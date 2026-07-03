@@ -128,6 +128,12 @@ Example:
 }
 ```
 
+**Note on token counts:** "tokens" throughout the card counts input+output
+(conversation) tokens only — prompt-cache creation/read tokens are
+deliberately excluded, since cache-read volume can dwarf actual conversation
+size and would otherwise make the headline number reflect cache mechanics
+rather than real usage.
+
 ## How multi-machine sync works
 
 Each machine writes its own complete usage history as a snapshot file under

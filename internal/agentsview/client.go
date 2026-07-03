@@ -66,26 +66,48 @@ type FetchOptions struct {
 	Since string
 }
 
-// DailyRow is one row of the `daily[]` array from
-// `agentsview usage daily --json --breakdown`.
+// DailyRow is one flattened (day, model) usage observation, derived from a
+// `daily[]` entry's `modelBreakdowns[]` in `agentsview usage daily --json
+// --breakdown` (real schema, see internal/agentsview/testdata — the API has
+// no flat per-row shape like this; parseUsageDaily flattens it from the
+// nested rawDailyEntry/rawBreakdown decode types).
+//
+// Agent attribution: Agent is always the FetchOptions.Agent the call was
+// made with, never read from the response's own `agentBreakdowns[]`. An
+// *unfiltered* call's modelBreakdowns aggregate a model's usage across every
+// agent, so a single modelBreakdown entry can't be attributed to one agent
+// from the JSON alone. Resolve, however, only ever calls FetchUsageDaily
+// once per known agent (--agent set), so for every row this code actually
+// produces in production, FetchOptions.Agent is exact and unambiguous.
+//
+// Token definition: Tokens is deliberately inputTokens+outputTokens only —
+// it excludes cacheCreationTokens/cacheReadTokens. Observed real usage has
+// cacheReadTokens over 100x inputTokens on some days; folding cache tokens
+// in would make the headline "tokens used" number reflect cache mechanics
+// rather than meaningful conversational usage.
 type DailyRow struct {
-	Date   string  `json:"date"`
-	Agent  string  `json:"agent,omitzero"`
-	Model  string  `json:"model,omitzero"`
-	Tokens int64   `json:"tokens,omitzero"`
-	Cost   float64 `json:"cost,omitzero"`
+	Date   string
+	Agent  string
+	Model  string
+	Tokens int64
+	Cost   float64
 }
 
-// Totals is the `totals` object from `agentsview usage daily --json --breakdown`.
+// Totals aggregates Tokens/Cost using the same definitions as DailyRow
+// (conversation tokens only, cache excluded). It doubles as the decoded
+// shape of the API's top-level `totals` object (via rawTotals) and as the
+// return type of Dataset's aggregation methods (resolve.go), so the two are
+// directly comparable.
 type Totals struct {
-	Tokens int64   `json:"tokens,omitzero"`
-	Cost   float64 `json:"cost,omitzero"`
+	Tokens int64
+	Cost   float64
 }
 
-// UsageDaily is the decoded response of `agentsview usage daily --json --breakdown`.
+// UsageDaily is the decoded, flattened response of one `agentsview usage
+// daily --json --breakdown` invocation.
 type UsageDaily struct {
-	Daily  []DailyRow `json:"daily,omitzero"`
-	Totals Totals     `json:"totals,omitzero"`
+	Daily  []DailyRow
+	Totals Totals
 }
 
 // FetchUsageDaily runs `agentsview usage daily --json --breakdown --offline`
@@ -98,7 +120,10 @@ func (c *Client) FetchUsageDaily(ctx context.Context, opts FetchOptions) (*Usage
 		return nil, fmt.Errorf("looking up %q: %w", bin, ErrNotInstalled)
 	}
 
-	args := []string{"usage", "daily", "--json", "--breakdown", "--offline"}
+	// --timezone UTC (KTD5): bucket days in UTC rather than agentsview's
+	// default of the local system timezone, so dates are stable across
+	// machines in different timezones.
+	args := []string{"usage", "daily", "--json", "--breakdown", "--offline", "--timezone", "UTC"}
 	if opts.Agent != "" {
 		args = append(args, "--agent", opts.Agent)
 	}
@@ -115,17 +140,18 @@ func (c *Client) FetchUsageDaily(ctx context.Context, opts FetchOptions) (*Usage
 		return nil, &ExitError{Err: err, Stderr: stderr.String()}
 	}
 
-	return parseUsageDaily(stdout.Bytes())
+	return parseUsageDaily(stdout.Bytes(), opts.Agent)
 }
 
 // sessionListResponse is the decoded response of `agentsview session list
-// --json`. ASSUMPTION: this JSON shape isn't vendored in this repo (unlike
-// `usage daily`, agentsview's session-list schema isn't documented here), so
-// it's a permissive best-effort decode: each session carries at least an
-// `agent` field, and pagination continues via NextCursor until it's empty.
+// --json` (real schema confirmed against a captured response, see
+// internal/agentsview/testdata/real_session_list_trimmed.json — note
+// next_cursor is snake_case, unlike usage daily's camelCase fields). Only
+// the fields ListActiveAgents needs are decoded; the rest of the payload's
+// many session fields are ignored.
 type sessionListResponse struct {
 	Sessions   []sessionSummary `json:"sessions,omitzero"`
-	NextCursor string           `json:"nextCursor,omitzero"`
+	NextCursor string           `json:"next_cursor,omitzero"`
 }
 
 type sessionSummary struct {
@@ -190,13 +216,67 @@ func fetchSessionListPage(ctx context.Context, path, cursor string) (*sessionLis
 	return &resp, nil
 }
 
-// parseUsageDaily decodes agentsview's `usage daily --json --breakdown` output.
-// Per agentsview's own additive-schema guidance, unrecognized fields are
+// rawUsageDaily is the literal decode shape of `agentsview usage daily
+// --json --breakdown`'s real response (verified against captured fixtures,
+// see internal/agentsview/testdata/real_usage_daily_claude.json). Only the
+// fields parseUsageDaily's flattening needs are declared; per agentsview's
+// own additive-schema guidance, every other field (projectBreakdowns,
+// agentBreakdowns, modelsUsed, sessionCounts, cache token counts, etc.) is
 // ignored — encoding/json does this by default, so no extra code is needed.
-func parseUsageDaily(data []byte) (*UsageDaily, error) {
-	var out UsageDaily
-	if err := json.Unmarshal(data, &out); err != nil {
+type rawUsageDaily struct {
+	Daily  []rawDailyEntry `json:"daily"`
+	Totals rawTotals       `json:"totals"`
+}
+
+// rawDailyEntry is one entry of the real `daily[]` array — one per
+// calendar day in the requested window.
+type rawDailyEntry struct {
+	Date            string         `json:"date"`
+	ModelBreakdowns []rawBreakdown `json:"modelBreakdowns"`
+}
+
+// rawBreakdown is one entry of a rawDailyEntry's `modelBreakdowns[]` — one
+// per model used that day (scoped to the requested --agent, if any).
+type rawBreakdown struct {
+	ModelName    string  `json:"modelName"`
+	InputTokens  int64   `json:"inputTokens"`
+	OutputTokens int64   `json:"outputTokens"`
+	Cost         float64 `json:"cost"`
+}
+
+// rawTotals is the real top-level `totals` object.
+type rawTotals struct {
+	InputTokens  int64   `json:"inputTokens"`
+	OutputTokens int64   `json:"outputTokens"`
+	TotalCost    float64 `json:"totalCost"`
+}
+
+// parseUsageDaily decodes agentsview's `usage daily --json --breakdown`
+// output and flattens each day's modelBreakdowns into one DailyRow per
+// (day, model), attributing every row to agent (see DailyRow's doc comment
+// for why attribution comes from the caller rather than the response).
+func parseUsageDaily(data []byte, agent string) (*UsageDaily, error) {
+	var raw rawUsageDaily
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("decoding agentsview usage daily output: %w", err)
 	}
-	return &out, nil
+
+	out := &UsageDaily{
+		Totals: Totals{
+			Tokens: raw.Totals.InputTokens + raw.Totals.OutputTokens,
+			Cost:   raw.Totals.TotalCost,
+		},
+	}
+	for _, day := range raw.Daily {
+		for _, mb := range day.ModelBreakdowns {
+			out.Daily = append(out.Daily, DailyRow{
+				Date:   day.Date,
+				Agent:  agent,
+				Model:  mb.ModelName,
+				Tokens: mb.InputTokens + mb.OutputTokens,
+				Cost:   mb.Cost,
+			})
+		}
+	}
+	return out, nil
 }

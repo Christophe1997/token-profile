@@ -102,10 +102,14 @@ func runGitT(t *testing.T, dir string, args ...string) string {
 // asks this fixture for that same agent's usage.
 func fakeAgentsviewBinary(t *testing.T, agent, model, date string, tokens int64, cost float64) string {
 	t.Helper()
-	sessionJSON := fmt.Sprintf(`{"sessions": [{"agent": %q}], "nextCursor": ""}`, agent)
+	sessionJSON := fmt.Sprintf(`{"sessions": [{"agent": %q}], "next_cursor": ""}`, agent)
+	// Real usage-daily schema (see internal/agentsview/testdata): nested
+	// modelBreakdowns, not a flat agent/model/tokens row. All of tokens is
+	// modeled as inputTokens (outputTokens: 0) since only their sum matters
+	// to DailyRow.Tokens.
 	usageJSON := fmt.Sprintf(
-		`{"daily": [{"date": %q, "agent": %q, "model": %q, "tokens": %d, "cost": %v}], "totals": {"tokens": %d, "cost": %v}}`,
-		date, agent, model, tokens, cost, tokens, cost,
+		`{"daily": [{"date": %q, "modelBreakdowns": [{"modelName": %q, "inputTokens": %d, "outputTokens": 0, "cost": %v}]}], "totals": {"inputTokens": %d, "outputTokens": 0, "totalCost": %v}}`,
+		date, model, tokens, cost, tokens, cost,
 	)
 
 	script := "#!/bin/sh\n" +

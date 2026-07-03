@@ -83,11 +83,11 @@ fi
 func TestResolve_HappyPath_TwoAgentsDistinctModels(t *testing.T) {
 	bin := fakeMultiAgentBinary(t,
 		map[string]string{
-			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": ""}`,
+			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "next_cursor": ""}`,
 		},
 		map[string]string{
-			"claude-code": `{"daily": [{"date": "2026-06-20", "agent": "claude-code", "model": "claude-sonnet-5", "tokens": 100, "cost": 1.0}], "totals": {"tokens": 100, "cost": 1.0}}`,
-			"codex":       `{"daily": [{"date": "2026-06-20", "agent": "codex", "model": "gpt-5.4", "tokens": 50, "cost": 0.5}], "totals": {"tokens": 50, "cost": 0.5}}`,
+			"claude-code": `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "claude-sonnet-5", "inputTokens": 60, "outputTokens": 40, "cost": 1.0}]}], "totals": {"inputTokens": 60, "outputTokens": 40, "totalCost": 1.0}}`,
+			"codex":       `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "gpt-5.4", "inputTokens": 30, "outputTokens": 20, "cost": 0.5}]}], "totals": {"inputTokens": 30, "outputTokens": 20, "totalCost": 0.5}}`,
 		},
 	)
 	client := &Client{BinaryName: bin}
@@ -131,14 +131,22 @@ func TestResolve_HappyPath_TwoAgentsDistinctModels(t *testing.T) {
 // must equal what a single unfiltered FetchUsageDaily call reports for the
 // same window.
 func TestResolve_SumMatchesUnfilteredCall(t *testing.T) {
+	// Per-agent filtered calls report the same modelBreakdowns split as the
+	// synthetic per-agent bodies below; the unfiltered call's modelBreakdowns
+	// aggregate across every agent's usage (real-schema behavior, see
+	// DailyRow's doc comment) — here that happens to be one entry per
+	// distinct model since each agent used a different model. The
+	// comparison below is over Totals (grand sums), not per-row equality,
+	// since row-level Agent attribution is opts.Agent-derived and therefore
+	// meaningless for the unfiltered call.
 	bin := fakeMultiAgentBinary(t,
 		map[string]string{
-			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": ""}`,
+			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "next_cursor": ""}`,
 		},
 		map[string]string{
-			"claude-code": `{"daily": [{"date": "2026-06-20", "agent": "claude-code", "model": "claude-sonnet-5", "tokens": 100, "cost": 1.0}], "totals": {"tokens": 100, "cost": 1.0}}`,
-			"codex":       `{"daily": [{"date": "2026-06-20", "agent": "codex", "model": "gpt-5.4", "tokens": 50, "cost": 0.5}], "totals": {"tokens": 50, "cost": 0.5}}`,
-			"":            `{"daily": [{"date": "2026-06-20", "agent": "claude-code", "model": "claude-sonnet-5", "tokens": 100, "cost": 1.0}, {"date": "2026-06-20", "agent": "codex", "model": "gpt-5.4", "tokens": 50, "cost": 0.5}], "totals": {"tokens": 150, "cost": 1.5}}`,
+			"claude-code": `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "claude-sonnet-5", "inputTokens": 60, "outputTokens": 40, "cost": 1.0}]}], "totals": {"inputTokens": 60, "outputTokens": 40, "totalCost": 1.0}}`,
+			"codex":       `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "gpt-5.4", "inputTokens": 30, "outputTokens": 20, "cost": 0.5}]}], "totals": {"inputTokens": 30, "outputTokens": 20, "totalCost": 0.5}}`,
+			"":            `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "claude-sonnet-5", "inputTokens": 60, "outputTokens": 40, "cost": 1.0}, {"modelName": "gpt-5.4", "inputTokens": 30, "outputTokens": 20, "cost": 0.5}]}], "totals": {"inputTokens": 90, "outputTokens": 60, "totalCost": 1.5}}`,
 		},
 	)
 	client := &Client{BinaryName: bin}
@@ -164,11 +172,11 @@ func TestResolve_SumMatchesUnfilteredCall(t *testing.T) {
 func TestResolve_ZeroUsageAgentOmitted(t *testing.T) {
 	bin := fakeMultiAgentBinary(t,
 		map[string]string{
-			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": ""}`,
+			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "next_cursor": ""}`,
 		},
 		map[string]string{
-			"claude-code": `{"daily": [{"date": "2026-06-20", "agent": "claude-code", "model": "claude-sonnet-5", "tokens": 100, "cost": 1.0}], "totals": {"tokens": 100, "cost": 1.0}}`,
-			"codex":       `{"daily": [{"date": "2026-06-20", "agent": "codex", "model": "gpt-5.4", "tokens": 0, "cost": 0}], "totals": {"tokens": 0, "cost": 0}}`,
+			"claude-code": `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "claude-sonnet-5", "inputTokens": 60, "outputTokens": 40, "cost": 1.0}]}], "totals": {"inputTokens": 60, "outputTokens": 40, "totalCost": 1.0}}`,
+			"codex":       `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "gpt-5.4", "inputTokens": 0, "outputTokens": 0, "cost": 0}]}], "totals": {"inputTokens": 0, "outputTokens": 0, "totalCost": 0}}`,
 		},
 	)
 	client := &Client{BinaryName: bin}
@@ -195,11 +203,11 @@ func TestResolve_ZeroUsageAgentOmitted(t *testing.T) {
 func TestResolve_SameModelAcrossAgents_ByModelSumsByToolSeparates(t *testing.T) {
 	bin := fakeMultiAgentBinary(t,
 		map[string]string{
-			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": ""}`,
+			"": `{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "next_cursor": ""}`,
 		},
 		map[string]string{
-			"claude-code": `{"daily": [{"date": "2026-06-20", "agent": "claude-code", "model": "gpt-5.4", "tokens": 100, "cost": 1.0}], "totals": {"tokens": 100, "cost": 1.0}}`,
-			"codex":       `{"daily": [{"date": "2026-06-20", "agent": "codex", "model": "gpt-5.4", "tokens": 50, "cost": 0.5}], "totals": {"tokens": 50, "cost": 0.5}}`,
+			"claude-code": `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "gpt-5.4", "inputTokens": 60, "outputTokens": 40, "cost": 1.0}]}], "totals": {"inputTokens": 60, "outputTokens": 40, "totalCost": 1.0}}`,
+			"codex":       `{"daily": [{"date": "2026-06-20", "modelBreakdowns": [{"modelName": "gpt-5.4", "inputTokens": 30, "outputTokens": 20, "cost": 0.5}]}], "totals": {"inputTokens": 30, "outputTokens": 20, "totalCost": 0.5}}`,
 		},
 	)
 	client := &Client{BinaryName: bin}

@@ -1,0 +1,414 @@
+{
+  "daily": [
+    {
+      "date": "2026-06-25",
+      "inputTokens": 951947,
+      "outputTokens": 733855,
+      "cacheCreationTokens": 3850889,
+      "cacheReadTokens": 154008870,
+      "totalCost": 122.76023034999999,
+      "modelsUsed": [
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 951828,
+          "outputTokens": 718247,
+          "cacheCreationTokens": 3672790,
+          "cacheReadTokens": 151434047,
+          "cost": 121.38727599999999
+        },
+        {
+          "modelName": "claude-sonnet-4-6",
+          "inputTokens": 57,
+          "outputTokens": 9850,
+          "cacheCreationTokens": 111535,
+          "cacheReadTokens": 2186189,
+          "cost": 1.2220339500000001
+        },
+        {
+          "modelName": "claude-haiku-4-5-20251001",
+          "inputTokens": 62,
+          "outputTokens": 5758,
+          "cacheCreationTokens": 66564,
+          "cacheReadTokens": 388634,
+          "cost": 0.15092040000000004
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 928700,
+          "outputTokens": 720940,
+          "cacheCreationTokens": 3784461,
+          "cacheReadTokens": 152752138,
+          "cost": 121.27757934999998
+        },
+        {
+          "project": "agent_extentions",
+          "inputTokens": 23247,
+          "outputTokens": 12915,
+          "cacheCreationTokens": 66428,
+          "cacheReadTokens": 1256732,
+          "cost": 1.4826510000000002
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 951947,
+          "outputTokens": 733855,
+          "cacheCreationTokens": 3850889,
+          "cacheReadTokens": 154008870,
+          "cost": 122.76023034999999
+        }
+      ]
+    },
+    {
+      "date": "2026-06-26",
+      "inputTokens": 23387,
+      "outputTokens": 51164,
+      "cacheCreationTokens": 138586,
+      "cacheReadTokens": 7084930,
+      "totalCost": 5.804662499999997,
+      "modelsUsed": [
+        "claude-opus-4-8"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 23387,
+          "outputTokens": 51164,
+          "cacheCreationTokens": 138586,
+          "cacheReadTokens": 7084930,
+          "cost": 5.804662499999997
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 23387,
+          "outputTokens": 51164,
+          "cacheCreationTokens": 138586,
+          "cacheReadTokens": 7084930,
+          "cost": 5.804662499999997
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 23387,
+          "outputTokens": 51164,
+          "cacheCreationTokens": 138586,
+          "cacheReadTokens": 7084930,
+          "cost": 5.804662499999997
+        }
+      ]
+    },
+    {
+      "date": "2026-06-29",
+      "inputTokens": 161715,
+      "outputTokens": 309788,
+      "cacheCreationTokens": 1179182,
+      "cacheReadTokens": 61157133,
+      "totalCost": 40.798189199999996,
+      "modelsUsed": [
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 160167,
+          "outputTokens": 264526,
+          "cacheCreationTokens": 800583,
+          "cacheReadTokens": 53909351,
+          "cost": 39.37230424999999
+        },
+        {
+          "modelName": "claude-haiku-4-5-20251001",
+          "inputTokens": 1548,
+          "outputTokens": 45262,
+          "cacheCreationTokens": 378599,
+          "cacheReadTokens": 7247782,
+          "cost": 1.4258849500000006
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 161715,
+          "outputTokens": 309788,
+          "cacheCreationTokens": 1179182,
+          "cacheReadTokens": 61157133,
+          "cost": 40.798189199999996
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 161715,
+          "outputTokens": 309788,
+          "cacheCreationTokens": 1179182,
+          "cacheReadTokens": 61157133,
+          "cost": 40.798189199999996
+        }
+      ]
+    },
+    {
+      "date": "2026-06-30",
+      "inputTokens": 616188,
+      "outputTokens": 333195,
+      "cacheCreationTokens": 1578067,
+      "cacheReadTokens": 49074657,
+      "totalCost": 45.43526305,
+      "modelsUsed": [
+        "claude-opus-4-8",
+        "claude-sonnet-4-6"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 616183,
+          "outputTokens": 327946,
+          "cacheCreationTokens": 1458799,
+          "cacheReadTokens": 48949011,
+          "cost": 44.871564250000006
+        },
+        {
+          "modelName": "claude-sonnet-4-6",
+          "inputTokens": 5,
+          "outputTokens": 5249,
+          "cacheCreationTokens": 119268,
+          "cacheReadTokens": 125646,
+          "cost": 0.5636988
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 616188,
+          "outputTokens": 333195,
+          "cacheCreationTokens": 1578067,
+          "cacheReadTokens": 49074657,
+          "cost": 45.43526305
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 616188,
+          "outputTokens": 333195,
+          "cacheCreationTokens": 1578067,
+          "cacheReadTokens": 49074657,
+          "cost": 45.43526305
+        }
+      ]
+    },
+    {
+      "date": "2026-07-01",
+      "inputTokens": 4939736,
+      "outputTokens": 502575,
+      "cacheCreationTokens": 6966140,
+      "cacheReadTokens": 27782424,
+      "totalCost": 94.50397099999992,
+      "modelsUsed": [
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 4939718,
+          "outputTokens": 498910,
+          "cacheCreationTokens": 6944431,
+          "cacheReadTokens": 27765539,
+          "cost": 94.45680324999992
+        },
+        {
+          "modelName": "claude-haiku-4-5-20251001",
+          "inputTokens": 18,
+          "outputTokens": 3665,
+          "cacheCreationTokens": 21709,
+          "cacheReadTokens": 16885,
+          "cost": 0.04716775
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 4897957,
+          "outputTokens": 455609,
+          "cacheCreationTokens": 6707243,
+          "cacheReadTokens": 25420208,
+          "cost": 90.32171174999992
+        },
+        {
+          "project": "change_focus",
+          "inputTokens": 41779,
+          "outputTokens": 46966,
+          "cacheCreationTokens": 258897,
+          "cacheReadTokens": 2362216,
+          "cost": 4.1822592499999995
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 4939736,
+          "outputTokens": 502575,
+          "cacheCreationTokens": 6966140,
+          "cacheReadTokens": 27782424,
+          "cost": 94.50397099999992
+        }
+      ]
+    },
+    {
+      "date": "2026-07-02",
+      "inputTokens": 77935,
+      "outputTokens": 151914,
+      "cacheCreationTokens": 475478,
+      "cacheReadTokens": 14775008,
+      "totalCost": 14.5467665,
+      "modelsUsed": [
+        "claude-opus-4-8"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 77935,
+          "outputTokens": 151914,
+          "cacheCreationTokens": 475478,
+          "cacheReadTokens": 14775008,
+          "cost": 14.5467665
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "jobyard",
+          "inputTokens": 38404,
+          "outputTokens": 60240,
+          "cacheCreationTokens": 160114,
+          "cacheReadTokens": 5373042,
+          "cost": 5.3852535
+        },
+        {
+          "project": "change_focus",
+          "inputTokens": 13901,
+          "outputTokens": 48911,
+          "cacheCreationTokens": 190174,
+          "cacheReadTokens": 5622177,
+          "cost": 5.291956000000001
+        },
+        {
+          "project": "agent_extentions",
+          "inputTokens": 25630,
+          "outputTokens": 42763,
+          "cacheCreationTokens": 125190,
+          "cacheReadTokens": 3779789,
+          "cost": 3.8695569999999995
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 77935,
+          "outputTokens": 151914,
+          "cacheCreationTokens": 475478,
+          "cacheReadTokens": 14775008,
+          "cost": 14.5467665
+        }
+      ]
+    },
+    {
+      "date": "2026-07-03",
+      "inputTokens": 653064,
+      "outputTokens": 1219771,
+      "cacheCreationTokens": 4944252,
+      "cacheReadTokens": 129088842,
+      "totalCost": 76.57725950000001,
+      "modelsUsed": [
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+        "claude-opus-4-8"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-sonnet-5",
+          "inputTokens": 630162,
+          "outputTokens": 1193391,
+          "cacheCreationTokens": 4707435,
+          "cacheReadTokens": 128363240,
+          "cost": 75.95320425000001
+        },
+        {
+          "modelName": "claude-haiku-4-5-20251001",
+          "inputTokens": 6237,
+          "outputTokens": 26153,
+          "cacheCreationTokens": 232390,
+          "cacheReadTokens": 707260,
+          "cost": 0.4982155
+        },
+        {
+          "modelName": "claude-opus-4-8",
+          "inputTokens": 16665,
+          "outputTokens": 227,
+          "cacheCreationTokens": 4427,
+          "cacheReadTokens": 18342,
+          "cost": 0.12583975
+        }
+      ],
+      "projectBreakdowns": [
+        {
+          "project": "token_profile",
+          "inputTokens": 603168,
+          "outputTokens": 1155835,
+          "cacheCreationTokens": 4676059,
+          "cacheReadTokens": 118137609,
+          "cost": 71.12710195000001
+        },
+        {
+          "project": "jobyard",
+          "inputTokens": 49896,
+          "outputTokens": 63936,
+          "cacheCreationTokens": 268193,
+          "cacheReadTokens": 10951233,
+          "cost": 5.450157549999998
+        }
+      ],
+      "agentBreakdowns": [
+        {
+          "agent": "claude",
+          "inputTokens": 653064,
+          "outputTokens": 1219771,
+          "cacheCreationTokens": 4944252,
+          "cacheReadTokens": 129088842,
+          "cost": 76.57725950000001
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "inputTokens": 7423972,
+    "outputTokens": 3302262,
+    "cacheCreationTokens": 19132594,
+    "cacheReadTokens": 442971864,
+    "totalCost": 400.4263420999999,
+    "cacheSavings": 1707.3128719000094
+  },
+  "sessionCounts": {
+    "total": 463,
+    "byProject": {
+      "agent_extentions": 4,
+      "change_focus": 3,
+      "jobyard": 417,
+      "token_profile": 39
+    },
+    "byAgent": {
+      "claude": 463
+    }
+  }
+}
