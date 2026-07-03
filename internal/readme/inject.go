@@ -10,9 +10,20 @@ import (
 	"strings"
 )
 
+// StartMarker and EndMarker delimit the token-profile section of a README
+// (KTD7). They are exported so internal/cli's `init` command — the only
+// other package that needs to recognize or scaffold these markers — has a
+// single source of truth instead of duplicating the literal strings.
 const (
-	startMarker = "<!-- token-profile:start -->"
-	endMarker   = "<!-- token-profile:end -->"
+	StartMarker = "<!-- token-profile:start -->"
+	EndMarker   = "<!-- token-profile:end -->"
+)
+
+// Kept as unexported aliases so the rest of this file's logic doesn't need
+// a mechanical rename.
+const (
+	startMarker = StartMarker
+	endMarker   = EndMarker
 )
 
 // ErrMarkersMissing indicates the README lacks one or both token-profile

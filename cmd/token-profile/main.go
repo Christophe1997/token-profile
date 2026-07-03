@@ -30,5 +30,6 @@ func newRootCmd() *cobra.Command {
 		Version: version,
 	}
 	root.AddCommand(cli.NewRunCmd())
+	root.AddCommand(cli.NewInitCmd())
 	return root
 }
