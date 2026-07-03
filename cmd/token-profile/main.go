@@ -1,6 +1,7 @@
 // Command token-profile renders a GitHub profile dashboard card from local
-// AI-coding-session usage data. This entrypoint currently only wires up the
-// root command; `run` and `init` subcommands are added in later units.
+// AI-coding-session usage data. This entrypoint wires up the root command
+// and attaches its subcommands; the actual logic behind each subcommand
+// lives in internal/cli.
 package main
 
 import (
@@ -8,6 +9,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/Christophe1997/token-profile/internal/cli"
 )
 
 // version is overridden at build time via -ldflags.
@@ -21,9 +24,11 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
-	return &cobra.Command{
+	root := &cobra.Command{
 		Use:     "token-profile",
 		Short:   "Render a GitHub profile dashboard card from local AI coding usage data",
 		Version: version,
 	}
+	root.AddCommand(cli.NewRunCmd())
+	return root
 }
