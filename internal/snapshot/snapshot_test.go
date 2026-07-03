@@ -55,6 +55,65 @@ func TestWrite_PersistsUnderTargetRepoSnapshotsDir(t *testing.T) {
 	}
 }
 
+// TestWrite_RejectsMaliciousMachineID covers defense in depth (KTD6): even
+// if a malformed machine id reaches this package some other way (bypassing
+// machineid.Load's own validation), Write must reject anything that isn't a
+// single clean path component rather than letting filepath.Join carry a
+// "../../evil" style id outside the snapshots directory.
+func TestWrite_RejectsMaliciousMachineID(t *testing.T) {
+	dir := t.TempDir()
+	rows := []snapshot.Row{{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1, Cost: 0.1}}
+
+	for _, machineID := range []string{"../../evil", "sub/dir", `sub\dir`, ".."} {
+		t.Run(machineID, func(t *testing.T) {
+			if err := snapshot.Write(dir, machineID, rows); err == nil {
+				t.Fatalf("Write(%q) error = nil, want an error rejecting the malicious machine id", machineID)
+			}
+		})
+	}
+
+	// "../../evil" resolves to <dir>/evil.json (two levels above the
+	// snapshots dir lands back at dir itself) — still inside the test's own
+	// tempdir, so safe to assert against, and it must NOT have been created.
+	if _, err := os.Stat(filepath.Join(dir, "evil.json")); !os.IsNotExist(err) {
+		t.Errorf("Write() must not write outside the snapshots directory; stat(%s) error = %v", filepath.Join(dir, "evil.json"), err)
+	}
+}
+
+// TestRead_RejectsMaliciousMachineID mirrors TestWrite_RejectsMaliciousMachineID
+// for the read path.
+func TestRead_RejectsMaliciousMachineID(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := snapshot.Read(dir, "../../evil"); err == nil {
+		t.Fatal("Read() error = nil, want an error rejecting the malicious machine id")
+	}
+}
+
+// TestWrite_NoStrayTempFilesLeftBehind covers the atomic-write fix: after a
+// successful Write, the snapshots directory must contain only the final
+// <machine-id>.json file — no leftover temp file from the write-then-rename
+// sequence.
+func TestWrite_NoStrayTempFilesLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	rows := []snapshot.Row{{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1, Cost: 0.1}}
+
+	if err := snapshot.Write(dir, "machine-a", rows); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, ".token-profile", "snapshots"))
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	if len(names) != 1 || names[0] != "machine-a.json" {
+		t.Errorf("snapshots dir contents = %v, want only [machine-a.json]", names)
+	}
+}
+
 // TestWrite_RejectsMalformedDate covers proactive validation: a row whose
 // Date isn't a parseable calendar date must fail Write rather than being
 // silently persisted and corrupting later merges.

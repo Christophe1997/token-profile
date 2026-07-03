@@ -7,9 +7,11 @@ package snapshot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -36,12 +38,31 @@ func snapshotPath(targetRepo, machineID string) string {
 	return filepath.Join(snapshotsDir(targetRepo), machineID+".json")
 }
 
+// validateMachineID rejects a machineID that isn't a clean, single path
+// component. This is defense in depth alongside machineid.Load's own format
+// validation: if a malformed id (path separators, "..") ever reached
+// snapshotPath some other way, filepath.Join would resolve outside the
+// snapshots directory (KTD6 path traversal).
+func validateMachineID(machineID string) error {
+	if machineID == "" {
+		return errors.New("machine id must not be empty")
+	}
+	if strings.ContainsAny(machineID, `/\`) || strings.Contains(machineID, "..") {
+		return fmt.Errorf("invalid machine id %q: must not contain path separators or \"..\"", machineID)
+	}
+	return nil
+}
+
 // Write persists rows as machineID's complete current snapshot under
 // targetRepo, fully replacing any prior snapshot for this machine. Resolve
 // always produces this machine's complete window each run, so a full
 // replace (rather than an append/delta) is correct: re-running on the same
 // day naturally overwrites rather than double-counts (see merge.go).
 func Write(targetRepo, machineID string, rows []Row) error {
+	if err := validateMachineID(machineID); err != nil {
+		return fmt.Errorf("writing snapshot: %w", err)
+	}
+
 	normalized := make([]Row, len(rows))
 	for i, r := range rows {
 		date, err := normalizeDate(r.Date)
@@ -63,14 +84,48 @@ func Write(targetRepo, machineID string, rows []Row) error {
 	}
 
 	path := snapshotPath(targetRepo, machineID)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic(dir, path, data); err != nil {
 		return fmt.Errorf("writing snapshot %s: %w", path, err)
 	}
 	return nil
 }
 
+// writeFileAtomic writes data to path via a temp file created in dir
+// followed by a rename, so a process killed mid-write leaves either the
+// previous complete file or the new complete file — never a torn/partial
+// one (merge.go tolerates a corrupted file gracefully, but this avoids the
+// data gap entirely rather than relying on that fallback).
+func writeFileAtomic(dir, path string, data []byte) (err error) {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmpPath, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 // Read decodes machineID's snapshot file under targetRepo into rows.
 func Read(targetRepo, machineID string) ([]Row, error) {
+	if err := validateMachineID(machineID); err != nil {
+		return nil, fmt.Errorf("reading snapshot: %w", err)
+	}
+
 	path := snapshotPath(targetRepo, machineID)
 	rows, err := readSnapshotFile(path)
 	if err != nil {
