@@ -31,13 +31,30 @@ const (
 // case (KTD7) — callers should scaffold the markers via `token-profile init`.
 var ErrMarkersMissing = errors.New("token-profile markers not found in README")
 
+// ErrMarkersDuplicated indicates a marker appears more than once in the
+// README. Inject refuses to guess which occurrence is the intended one
+// (e.g. a manually pasted duplicate block) — callers must remove the
+// duplicate marker pair by hand before running again.
+var ErrMarkersDuplicated = errors.New("token-profile markers appear more than once in README")
+
 // Inject replaces everything strictly between the token-profile start/end
 // marker lines in readme with content, returning the updated file. Both
 // marker lines, and everything outside them, are left unchanged. If either
 // marker is missing (or they appear out of order), Inject returns an error
 // wrapping ErrMarkersMissing that points the caller at `token-profile init`
-// rather than guessing where to insert the markers.
+// rather than guessing where to insert the markers. If either marker appears
+// more than once, Inject returns an error wrapping ErrMarkersDuplicated
+// instead of guessing which occurrence is the intended one.
 func Inject(readmeBytes []byte, content string) ([]byte, error) {
+	startCount := bytes.Count(readmeBytes, []byte(startMarker))
+	endCount := bytes.Count(readmeBytes, []byte(endMarker))
+	if startCount > 1 || endCount > 1 {
+		return nil, fmt.Errorf(
+			"%w: found %q %d time(s) and %q %d time(s); manually remove the duplicate marker pair before running again",
+			ErrMarkersDuplicated, startMarker, startCount, endMarker, endCount,
+		)
+	}
+
 	startIdx := bytes.Index(readmeBytes, []byte(startMarker))
 	endIdx := bytes.Index(readmeBytes, []byte(endMarker))
 	if startIdx == -1 || endIdx == -1 || endIdx < startIdx {

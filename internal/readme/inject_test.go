@@ -39,6 +39,38 @@ Footer text.
 	}
 }
 
+func TestInject_DuplicateMarkers_ReturnsActionableError(t *testing.T) {
+	tests := []struct {
+		name   string
+		readme string
+	}{
+		{
+			"duplicate start marker",
+			"# My Profile\n\n<!-- token-profile:start -->\nold\n<!-- token-profile:end -->\n\n<!-- token-profile:start -->\nmore\n",
+		},
+		{
+			"duplicate end marker",
+			"# My Profile\n\n<!-- token-profile:end -->\n\n<!-- token-profile:start -->\nold\n<!-- token-profile:end -->\n",
+		},
+		{
+			"duplicate marker pair",
+			"# My Profile\n\n<!-- token-profile:start -->\nold 1\n<!-- token-profile:end -->\n\n<!-- token-profile:start -->\nold 2\n<!-- token-profile:end -->\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Inject([]byte(tt.readme), "new content")
+			if err == nil {
+				t.Fatal("Inject() error = nil, want an error about duplicated markers")
+			}
+			if !errors.Is(err, ErrMarkersDuplicated) {
+				t.Errorf("Inject() error = %v, want it to wrap ErrMarkersDuplicated", err)
+			}
+		})
+	}
+}
+
 func TestInject_MissingMarkers_ReturnsActionableError(t *testing.T) {
 	tests := []struct {
 		name   string
