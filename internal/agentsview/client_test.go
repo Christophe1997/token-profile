@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -101,5 +102,53 @@ exit 1
 	}
 	if !strings.Contains(err.Error(), "rate limit exceeded") {
 		t.Errorf("err.Error() = %q, want it to surface stderr content", err.Error())
+	}
+}
+
+func TestListActiveAgents_SinglePage_ReturnsDistinctSortedAgents(t *testing.T) {
+	bin := fakeAgentsview(t, `cat <<'EOF'
+{"sessions": [{"agent": "codex"}, {"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": ""}
+EOF
+`)
+	client := &Client{BinaryName: bin}
+
+	got, err := client.ListActiveAgents(t.Context())
+	if err != nil {
+		t.Fatalf("ListActiveAgents() error = %v, want nil", err)
+	}
+
+	want := []string{"claude-code", "codex"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListActiveAgents() = %v, want %v", got, want)
+	}
+}
+
+func TestListActiveAgents_PaginatesAcrossMultiplePages(t *testing.T) {
+	// Simulates a >500-session result split across two pages via cursor,
+	// with an overlapping "codex" agent on both pages to verify dedup holds
+	// across page boundaries too.
+	bin := fakeAgentsview(t, `case "$*" in
+  *"--cursor page2"*)
+    cat <<'EOF'
+{"sessions": [{"agent": "codex"}, {"agent": "gemini-cli"}], "nextCursor": ""}
+EOF
+    ;;
+  *)
+    cat <<'EOF'
+{"sessions": [{"agent": "claude-code"}, {"agent": "codex"}], "nextCursor": "page2"}
+EOF
+    ;;
+esac
+`)
+	client := &Client{BinaryName: bin}
+
+	got, err := client.ListActiveAgents(t.Context())
+	if err != nil {
+		t.Fatalf("ListActiveAgents() error = %v, want nil", err)
+	}
+
+	want := []string{"claude-code", "codex", "gemini-cli"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListActiveAgents() = %v, want %v (pagination should follow nextCursor until exhausted)", got, want)
 	}
 }
