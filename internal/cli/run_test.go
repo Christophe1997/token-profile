@@ -184,6 +184,103 @@ func TestRun_EndToEnd_SoloAdopterRefresh(t *testing.T) {
 	}
 }
 
+// TestRun_AccumulatesHistoryAcrossRuns covers end-to-end history
+// accumulation: a later run whose agentsview window no longer covers an
+// earlier run's day must not drop that day from the machine's published
+// snapshot — the two runs' disjoint days both survive on the remote.
+func TestRun_AccumulatesHistoryAcrossRuns(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "accum")
+
+	firstBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-05-01", 1000, 1.5)
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: firstBin},
+		MachineID: "machine-a",
+		Now:       time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("first Run() error = %v, want nil", err)
+	}
+
+	// A later run: agentsview's own window has moved on and returns only a
+	// new, disjoint day — 2026-05-01 is no longer in its response at all.
+	secondBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 500, 0.75)
+	deps.Client = &agentsview.Client{BinaryName: secondBin}
+	deps.Now = time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("second Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-accum")
+	rows, err := snapshot.Read(verify, "machine-a")
+	if err != nil {
+		t.Fatalf("snapshot.Read() error = %v, want nil", err)
+	}
+	want := []snapshot.Row{
+		{Date: "2026-05-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 500, Cost: 0.75},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("snapshot rows = %+v, want %+v (both runs' disjoint days must survive)", rows, want)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Errorf("snapshot rows[%d] = %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+}
+
+// TestRun_RendersWindowOverWindowRateAfterAccumulation covers the other
+// side of accumulated history: once a machine has data in both the current
+// window and the immediately preceding one, the published card must show a
+// window-over-window percentage change on tokens.
+func TestRun_RendersWindowOverWindowRateAfterAccumulation(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "rate")
+
+	// First run lands in what will become the *previous* window relative
+	// to the second run's Now (50 days later, within a 60-day/2-window span
+	// of the default 30-day trailing window).
+	firstBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-05-01", 1000, 10.0)
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: firstBin},
+		MachineID: "machine-a",
+		Now:       time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("first Run() error = %v, want nil", err)
+	}
+
+	secondBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1500, 15.0)
+	deps.Client = &agentsview.Client{BinaryName: secondBin}
+	deps.Now = time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	deps.Stdout = &buf
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("second Run() error = %v, want nil", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "(+50%)") {
+		t.Errorf("Run() Stdout = %q, want it to contain the window-over-window rate \"(+50%%)\" (1500 vs previous 1000)", got)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-rate")
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	if !strings.Contains(string(readmeBytes), "(+50%)") {
+		t.Errorf("README does not contain the window-over-window rate \"(+50%%)\":\n%s", readmeBytes)
+	}
+}
+
 // TestRun_MultiMachineMerge covers F2: a second machine's run must merge
 // cleanly with the first machine's already-pushed snapshot, so the rendered
 // card reflects combined totals from both machines, and both snapshot files

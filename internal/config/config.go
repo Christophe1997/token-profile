@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+// DefaultTrailingWindow is the concrete window used to scope the rendered
+// card (and its window-over-window comparison) to "the current window" when
+// TrailingWindow is unset. It matches agentsview's own default trailing
+// window (KTD10) so an unset TrailingWindow renders the same period it
+// always has; it's a separate constant from the fetch path (sinceDate still
+// omits --since entirely on zero, per KTD10) because rendering now filters
+// already-accumulated local history (see internal/snapshot.Write) rather
+// than querying agentsview live, so it has no "just defer to the API's
+// default" option and must know a concrete number itself.
+const DefaultTrailingWindow = 30 * 24 * time.Hour
+
 // BreakdownMode selects how the rendered usage breakdown groups data.
 type BreakdownMode string
 

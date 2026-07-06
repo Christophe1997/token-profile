@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -139,7 +140,8 @@ func writeSuccessSummary(ctx context.Context, deps RunDeps) {
 		fmt.Fprintf(deps.Stdout, "published successfully, but computing the summary failed: %v\n", err)
 		return
 	}
-	sum := summary.Compute(merged, deps.Now)
+	window := cmp.Or(deps.Config.TrailingWindow, config.DefaultTrailingWindow)
+	sum := summary.Compute(merged, deps.Now, window)
 	commit, err := headCommit(ctx, deps.RepoDir)
 	if err != nil {
 		fmt.Fprintf(deps.Stdout, "%s (resolving the published commit hash failed: %v)\n", render.Headline(sum), err)
@@ -204,14 +206,23 @@ func fenceCard(card string) string {
 // gitops.Publish's post-rebase regenerate callback call this same helper,
 // so a rebase that pulls in another machine's data always gets reflected
 // in the README that's actually pushed.
+//
+// merged can now span far more than one window (Write accumulates history
+// across runs — see internal/snapshot), so it's scoped down to the current
+// window before rendering; summary.Compute takes the full merged dataset
+// instead, since it needs the preceding window too for TokenChangePct/
+// CostChangePct, and streak deliberately looks past the window entirely.
 func mergeRenderInject(deps RunDeps) error {
 	merged, err := snapshot.Merge(deps.RepoDir)
 	if err != nil {
 		return fmt.Errorf("merging snapshots: %w", err)
 	}
 
-	sum := summary.Compute(merged, deps.Now)
-	card := render.Render(merged, sum, deps.Config.Breakdown, deps.Now)
+	window := cmp.Or(deps.Config.TrailingWindow, config.DefaultTrailingWindow)
+	current := snapshot.FilterSince(merged, deps.Now.Add(-window))
+
+	sum := summary.Compute(merged, deps.Now, window)
+	card := render.Render(current, sum, deps.Config.Breakdown, deps.Now)
 
 	readmePath := filepath.Join(deps.RepoDir, readmeFile)
 	readmeBytes, err := os.ReadFile(readmePath)

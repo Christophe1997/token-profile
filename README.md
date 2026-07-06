@@ -10,7 +10,7 @@ the sync layer: no server, no account, no hosted service.
 ┌────────────────────────────────────────────────────┐
 │ Token Profile — last 3 days                        │
 │                                                    │
-│ Tokens: 2,700   Cost: $4.05                        │
+│ Tokens: 2,700 (+50%)   Cost: $4.05 (-10%)          │
 │                                                    │
 │ Trend:                                             │
 │  1,200 ┼────────╮                                  │
@@ -117,7 +117,7 @@ default.
 |---|---|---|---|
 | `targetRepo` | string | *(required)* | Local working-copy path of the repo hosting your rendered profile. `run`/`init` fail fast if this is unset. |
 | `breakdown` | `"per-model"` \| `"per-tool"` \| `"combined"` | `"per-model"` | How the rendered breakdown groups usage: by model, by coding agent/tool, or one combined total. |
-| `trailingWindow` | duration string (e.g. `"720h"`) | *(unset)* | How far back to query usage. Unset defers to agentsview's own default trailing window (30 days) rather than diverging from it. |
+| `trailingWindow` | duration string (e.g. `"720h"`) | *(unset)* | How far back the rendered card reaches, and the length of the window compared against for the window-over-window rate. Also bounds how far back usage is queried on each run. Unset defers to a 30-day default, matching agentsview's own. |
 | `machineIdPath` | string | `~/.token-profile/machine-id` | Where this machine's cached random identity is stored. Identity is random, not derived from hostname, so two machines that happen to share a hostname never collide. |
 
 Example:
@@ -137,15 +137,25 @@ billed against. Totals of a million or more are shortened with a unit
 suffix (e.g. `12.3M`, `1.4B`) everywhere a token count is shown, including
 the trend graph's y-axis.
 
+**Note on the window-over-window rate:** the `(+50%)`/`(-10%)` next to
+Tokens/Cost compares the current window against the immediately preceding,
+equal-length window (e.g. this week vs. last week). It's omitted once
+you've been running token-profile for less than two windows, since there's
+nothing yet to compare against.
+
 ## How multi-machine sync works
 
-Each machine writes its own complete usage history as a snapshot file under
-`<targetRepo>/.token-profile/snapshots/<machine-id>.json`. Every run reads
-every snapshot present in the repo — including ones from machines that
-haven't run in a while — and merges them into the totals, trend, and streak
-shown on the card. Git is the only sync layer: there's no server, queue, or
-shared database, and pushes retry through a bounded fetch-rebase loop if
-another one of your machines pushed first.
+Each machine writes its own usage history as a snapshot file under
+`<targetRepo>/.token-profile/snapshots/<machine-id>.json`, accumulating
+across runs: a new run's data is merged in by (date, agent, model), so
+history a day has already rolled out of the trailing window still stays on
+disk rather than being dropped. Every run reads every snapshot present in
+the repo — including ones from machines that haven't run in a while — and
+merges them into the totals, trend, and streak shown on the card, which is
+itself scoped to just the current window (see `trailingWindow` above). Git
+is the only sync layer: there's no server, queue, or shared database, and
+pushes retry through a bounded fetch-rebase loop if another one of your
+machines pushed first.
 
 ## Scope
 

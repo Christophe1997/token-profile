@@ -33,7 +33,7 @@ func fixtureDataset() snapshot.MergedDataset {
 func TestRender_HappyPath_AllFourBlocksInOrder(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -67,7 +67,7 @@ func TestRender_HappyPath_AllFourBlocksInOrder(t *testing.T) {
 func TestRender_TitleIsFirstContentLine(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -113,7 +113,7 @@ func TestRender_TitleIncludesStatDuration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-			sum := summary.Compute(tt.ds, asOf)
+			sum := summary.Compute(tt.ds, asOf, 30*24*time.Hour)
 			out := render.Render(tt.ds, sum, config.BreakdownPerModel, asOf)
 
 			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
@@ -135,7 +135,7 @@ func TestRender_TitleIncludesStatDuration(t *testing.T) {
 func TestRender_DefaultBreakdownIsPerModel(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -159,7 +159,7 @@ func TestRender_DefaultBreakdownIsPerModel(t *testing.T) {
 func TestRender_BreakdownModesDiffer(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
 	perModel := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -197,7 +197,7 @@ func TestRender_BreakdownModesDiffer(t *testing.T) {
 func TestRender_StaleRenderedAtVisibleAsOldDate(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	staleRenderedAt := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC) // 10 days before asOf
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, staleRenderedAt)
@@ -218,7 +218,7 @@ func TestRender_StaleRenderedAtVisibleAsOldDate(t *testing.T) {
 func TestRender_EmptyDataset_NoDataYetState(t *testing.T) {
 	ds := snapshot.MergedDataset{}
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -239,7 +239,7 @@ func TestRender_EmptyDataset_NoDataYetState(t *testing.T) {
 func TestRender_TrendGraphGroupsByDateSummingTokens(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -270,7 +270,7 @@ func TestRender_TrendYAxisUsesTokenUnits(t *testing.T) {
 		{Date: "2026-06-22", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 8_000_000, Cost: 15},
 	}}
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
 	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -300,7 +300,7 @@ func TestRender_SingleDayDataset_NoDuplicateAxisLabel(t *testing.T) {
 		{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
 	}}
 	asOf := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	// renderedAt deliberately differs from the dataset's sole date, so the
 	// "Last updated" line's own (legitimately different) date can't be
 	// mistaken for a second trend-graph occurrence of "07-01".
@@ -319,7 +319,7 @@ func TestRender_SingleDayDataset_NoDuplicateAxisLabel(t *testing.T) {
 func TestRender_GoldenFile(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	sum := summary.Compute(ds, asOf)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 
 	got := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
@@ -355,6 +355,39 @@ func TestHeadline_SingularDayStreak(t *testing.T) {
 
 	if !strings.HasSuffix(got, "Streak: 1 day") {
 		t.Errorf("Headline() = %q, want suffix %q", got, "Streak: 1 day")
+	}
+}
+
+// TestHeadline_ShowsWindowOverWindowChange covers the change-percentage
+// suffix: when Summary carries a window-over-window rate, it renders as a
+// signed, parenthesized percentage immediately after its total — positive
+// rates get an explicit "+", negative rates keep their own "-".
+func TestHeadline_ShowsWindowOverWindowChange(t *testing.T) {
+	tokenPct, costPct := 50.0, -12.0
+	sum := summary.Summary{
+		TotalTokens: 4100, TotalCost: 6.95, Streak: 3,
+		TokenChangePct: &tokenPct, CostChangePct: &costPct,
+	}
+
+	got := render.Headline(sum)
+
+	const want = "Tokens: 4,100 (+50%)   Cost: $6.95 (-12%)   Streak: 3 days"
+	if got != want {
+		t.Errorf("Headline() = %q, want %q", got, want)
+	}
+}
+
+// TestHeadline_OmitsChangeSuffixWhenNil covers the no-prior-window case:
+// nil TokenChangePct/CostChangePct must render with no suffix at all,
+// matching TestHeadline_FormatsTokensCostAndStreak's existing expectation.
+func TestHeadline_OmitsChangeSuffixWhenNil(t *testing.T) {
+	sum := summary.Summary{TotalTokens: 4100, TotalCost: 6.95, Streak: 3}
+
+	got := render.Headline(sum)
+
+	const want = "Tokens: 4,100   Cost: $6.95   Streak: 3 days"
+	if got != want {
+		t.Errorf("Headline() = %q, want %q", got, want)
 	}
 }
 

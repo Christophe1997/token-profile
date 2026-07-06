@@ -88,7 +88,20 @@ func Headline(sum summary.Summary) string {
 }
 
 func summaryLine(sum summary.Summary) string {
-	return fmt.Sprintf("Tokens: %s   Cost: $%.2f", formatTokens(sum.TotalTokens), sum.TotalCost)
+	return fmt.Sprintf("Tokens: %s%s   Cost: $%.2f%s",
+		formatTokens(sum.TotalTokens), changeSuffix(sum.TokenChangePct),
+		sum.TotalCost, changeSuffix(sum.CostChangePct),
+	)
+}
+
+// changeSuffix renders a window-over-window percentage change as
+// " (+50%)" (space-prefixed, parenthesized, explicitly signed) — or ""
+// when pct is nil, meaning there's no prior window to compare against.
+func changeSuffix(pct *float64) string {
+	if pct == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (%+.0f%%)", *pct)
 }
 
 func trendLines(ds snapshot.MergedDataset) []string {
