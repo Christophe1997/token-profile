@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -396,5 +397,394 @@ func TestInit_TargetRepoEmpty_FailsFast(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "targetRepo") {
 		t.Errorf("Init() error = %q, want actionable guidance mentioning %q", err.Error(), "targetRepo")
+	}
+}
+
+// TestIsInteractive_NonFileReader_ReturnsFalse covers every test fixture's
+// shape (strings.Reader, bytes.Buffer, ...): none of them are a real
+// terminal, so the auto-clone shortcut must never activate against one.
+func TestIsInteractive_NonFileReader_ReturnsFalse(t *testing.T) {
+	if isInteractive(strings.NewReader("y\n")) {
+		t.Error("isInteractive(strings.Reader) = true, want false")
+	}
+}
+
+// TestIsInteractive_RegularFile_ReturnsFalse covers a real *os.File that
+// isn't a character device (unlike a terminal) — e.g. redirecting stdin
+// from a plain file, as a scheduled cron/launchd invocation effectively
+// does.
+func TestIsInteractive_RegularFile_ReturnsFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plain.txt")
+	if err := os.WriteFile(path, []byte("y\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	regular, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer regular.Close()
+
+	if isInteractive(regular) {
+		t.Error("isInteractive(regular file) = true, want false")
+	}
+}
+
+// TestGitGlobalUserName_Configured_ReturnsIt and
+// TestGitGlobalUserName_Unset_ReturnsEmpty both point git's --global config
+// at a scratch HOME (via t.Setenv, auto-restored) so they never read or
+// mutate the real developer machine's ~/.gitconfig.
+func TestGitGlobalUserName_Configured_ReturnsIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runGitT(t, "", "config", "--global", "user.name", "octocat")
+
+	if got := gitGlobalUserName(t.Context()); got != "octocat" {
+		t.Errorf("gitGlobalUserName() = %q, want %q", got, "octocat")
+	}
+}
+
+func TestGitGlobalUserName_Unset_ReturnsEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if got := gitGlobalUserName(t.Context()); got != "" {
+		t.Errorf("gitGlobalUserName() = %q, want empty", got)
+	}
+}
+
+func TestValidAutoCloneName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"", false},
+		{".", false},
+		{"..", false},
+		{"a/b", false},
+		{`a\b`, false},
+		{"a..b", false},
+		{"octocat", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validAutoCloneName(tt.name); got != tt.want {
+				t.Errorf("validAutoCloneName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProfileRepoURL(t *testing.T) {
+	tests := []struct {
+		protocol string
+		want     string
+		wantErr  bool
+	}{
+		{cloneProtocolSSH, "git@github.com:octocat/octocat.git", false},
+		{cloneProtocolHTTPS, "https://github.com/octocat/octocat.git", false},
+		{"bogus", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.protocol, func(t *testing.T) {
+			got, err := profileRepoURL(tt.protocol, "octocat")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("profileRepoURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("profileRepoURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCloneProfileRepo_CreatesMissingParentDirs covers the fix: dest's
+// parent directory (~/.token-profile/repos, on a genuinely fresh machine)
+// won't exist yet, so cloneProfileRepo must create it before cloning.
+func TestCloneProfileRepo_CreatesMissingParentDirs(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	dest := filepath.Join(t.TempDir(), "nested", "missing", "octocat")
+
+	if err := cloneProfileRepo(t.Context(), remote, dest); err != nil {
+		t.Fatalf("cloneProfileRepo() error = %v, want nil", err)
+	}
+
+	out := runGitT(t, dest, "rev-parse", "--is-inside-work-tree")
+	if strings.TrimSpace(out) != "true" {
+		t.Errorf("git rev-parse --is-inside-work-tree = %q, want %q", out, "true")
+	}
+}
+
+func TestCloneProfileRepo_BadURL_ReturnsError(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "octocat")
+
+	if err := cloneProfileRepo(t.Context(), filepath.Join(t.TempDir(), "no-such-remote"), dest); err == nil {
+		t.Fatal("cloneProfileRepo() error = nil, want an error for a nonexistent remote")
+	}
+}
+
+func TestConfirmAutoClone(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"lowercase y", "y\n", true},
+		{"uppercase Y", "Y\n", true},
+		{"lowercase yes", "yes\n", true},
+		{"uppercase YES", "YES\n", true},
+		{"y with no trailing newline", "y", true},
+		{"n", "n\n", false},
+		{"empty line", "\n", false},
+		{"garbage", "maybe\n", false},
+		{"no input at all", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			got := confirmAutoClone(strings.NewReader(tt.input), &stdout, "git@github.com:octocat/octocat.git", "/home/adopter/.token-profile/repos/octocat")
+			if got != tt.want {
+				t.Errorf("confirmAutoClone(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfirmAutoClone_PromptContainsURLAndDest(t *testing.T) {
+	var stdout bytes.Buffer
+	confirmAutoClone(strings.NewReader("n\n"), &stdout, "git@github.com:octocat/octocat.git", "/home/adopter/.token-profile/repos/octocat")
+
+	got := stdout.String()
+	if !strings.Contains(got, "git@github.com:octocat/octocat.git") {
+		t.Errorf("confirmAutoClone() prompt = %q, want it to mention the clone URL", got)
+	}
+	if !strings.Contains(got, "/home/adopter/.token-profile/repos/octocat") {
+		t.Errorf("confirmAutoClone() prompt = %q, want it to mention the destination", got)
+	}
+}
+
+// failIfCalledGitUserName and failIfCalledClone build hooks for
+// bootstrapDeps that fail the test if invoked — used across the
+// bootstrapConfig tests below to prove the auto-clone shortcut's hooks
+// stay untouched whenever it shouldn't apply.
+func failIfCalledGitUserName(t *testing.T) func(ctx context.Context) string {
+	t.Helper()
+	return func(ctx context.Context) string {
+		t.Fatal("GitUserName was called, want it untouched")
+		return ""
+	}
+}
+
+func failIfCalledClone(t *testing.T) func(ctx context.Context, url, dest string) error {
+	t.Helper()
+	return func(ctx context.Context, url, dest string) error {
+		t.Fatal("Clone was called, want it untouched")
+		return nil
+	}
+}
+
+// TestBootstrapConfig_ConfigAlreadyExists_DelegatesToLoadOrScaffold covers
+// the case where a config file already sits at ConfigPath (even with a
+// blank targetRepo): bootstrapConfig must not offer the auto-clone
+// shortcut at all, regardless of Interactive.
+func TestBootstrapConfig_ConfigAlreadyExists_DelegatesToLoadOrScaffold(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", `{"breakdown":"per-model"}`)
+	path := filepath.Join(dir, "config.json")
+
+	cfg, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:  path,
+		Interactive: true,
+		Stdin:       strings.NewReader(""),
+		Stdout:      &bytes.Buffer{},
+		GitUserName: failIfCalledGitUserName(t),
+		Clone:       failIfCalledClone(t),
+	})
+	if err != nil {
+		t.Fatalf("bootstrapConfig() error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != "" {
+		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
+	}
+}
+
+// TestBootstrapConfig_NonInteractive_FallsBack covers a scheduled
+// cron/launchd invocation: no config file, but Interactive is false, so the
+// shortcut must never engage.
+func TestBootstrapConfig_NonInteractive_FallsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:  path,
+		Interactive: false,
+		Stdin:       strings.NewReader(""),
+		Stdout:      &bytes.Buffer{},
+		GitUserName: failIfCalledGitUserName(t),
+		Clone:       failIfCalledClone(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
+	}
+}
+
+// TestBootstrapConfig_NoGitUserName_FallsBack covers an interactive session
+// where git's global user.name is unset.
+func TestBootstrapConfig_NoGitUserName_FallsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:  path,
+		Interactive: true,
+		Stdin:       strings.NewReader(""),
+		Stdout:      &bytes.Buffer{},
+		GitUserName: func(ctx context.Context) string { return "" },
+		Clone:       failIfCalledClone(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
+	}
+}
+
+// TestBootstrapConfig_UnsafeGitUserName_FallsBack proves validAutoCloneName
+// is actually wired into bootstrapConfig, not just unit-tested standalone.
+func TestBootstrapConfig_UnsafeGitUserName_FallsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:  path,
+		Interactive: true,
+		Stdin:       strings.NewReader(""),
+		Stdout:      &bytes.Buffer{},
+		GitUserName: func(ctx context.Context) string { return "../escape" },
+		Clone:       failIfCalledClone(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
+	}
+}
+
+// TestBootstrapConfig_UserDeclines_FallsBackButShowsPrompt covers a
+// declined confirmation: the shortcut must still fall back to the plain
+// scaffold, but only after actually showing the prompt (proving the
+// decline was a real choice, not a short-circuit before asking).
+func TestBootstrapConfig_UserDeclines_FallsBackButShowsPrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	var stdout bytes.Buffer
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:    path,
+		Interactive:   true,
+		Stdin:         strings.NewReader("n\n"),
+		Stdout:        &stdout,
+		CloneProtocol: cloneProtocolSSH,
+		GitUserName:   func(ctx context.Context) string { return "octocat" },
+		Clone:         failIfCalledClone(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
+	}
+	if !strings.Contains(stdout.String(), "git@github.com:octocat/octocat.git") {
+		t.Errorf("Stdout = %q, want the auto-clone prompt to have been shown", stdout.String())
+	}
+}
+
+// TestBootstrapConfig_UserConfirms_ClonesAndWritesConfig covers the happy
+// path: a confirmed auto-clone must write a config whose targetRepo is the
+// clone destination, with a fully-populated MachineIDPath (pinning the
+// bug where an earlier draft hand-built the returned Config and dropped
+// it), and that config must already be on disk, not just in memory.
+func TestBootstrapConfig_UserConfirms_ClonesAndWritesConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	var clonedURL, clonedDest string
+	cfg, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:    path,
+		Interactive:   true,
+		Stdin:         strings.NewReader("y\n"),
+		Stdout:        &bytes.Buffer{},
+		CloneProtocol: cloneProtocolSSH,
+		GitUserName:   func(ctx context.Context) string { return "octocat" },
+		Clone: func(ctx context.Context, url, dest string) error {
+			clonedURL, clonedDest = url, dest
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("bootstrapConfig() error = %v, want nil", err)
+	}
+
+	wantDest := filepath.Join(home, ".token-profile", "repos", "octocat")
+	if clonedURL != "git@github.com:octocat/octocat.git" {
+		t.Errorf("Clone was called with url = %q, want %q", clonedURL, "git@github.com:octocat/octocat.git")
+	}
+	if clonedDest != wantDest {
+		t.Errorf("Clone was called with dest = %q, want %q", clonedDest, wantDest)
+	}
+	if cfg.TargetRepo != wantDest {
+		t.Errorf("TargetRepo = %q, want %q", cfg.TargetRepo, wantDest)
+	}
+	if cfg.MachineIDPath == "" {
+		t.Error("MachineIDPath is empty, want it populated (bootstrapConfig must reload via config.Load, not hand-build a Config)")
+	}
+
+	onDisk, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if onDisk != cfg {
+		t.Errorf("config.Load(path) = %+v, want it to match the returned config %+v (WriteTemplate must have actually landed on disk)", onDisk, cfg)
+	}
+}
+
+// TestBootstrapConfig_CloneFails_FallsBackAndReports covers a clone
+// failure (bad guess, no access, network error): the shortcut must fall
+// back to the plain scaffold, after reporting the failure.
+func TestBootstrapConfig_CloneFails_FallsBackAndReports(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	var stdout bytes.Buffer
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:    path,
+		Interactive:   true,
+		Stdin:         strings.NewReader("y\n"),
+		Stdout:        &stdout,
+		CloneProtocol: cloneProtocolSSH,
+		GitUserName:   func(ctx context.Context) string { return "octocat" },
+		Clone: func(ctx context.Context, url, dest string) error {
+			return errors.New("clone failed: repository not found")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
+	}
+	if !strings.Contains(stdout.String(), "auto-clone failed") {
+		t.Errorf("Stdout = %q, want it to report the clone failure", stdout.String())
+	}
+}
+
+// TestBootstrapConfig_InvalidCloneProtocol_ErrorsBeforePrompting covers an
+// invalid --clone-protocol value: it must error immediately, before the
+// prompt is ever shown (Stdout untouched) or Clone is invoked.
+func TestBootstrapConfig_InvalidCloneProtocol_ErrorsBeforePrompting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	var stdout bytes.Buffer
+
+	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
+		ConfigPath:    path,
+		Interactive:   true,
+		Stdin:         strings.NewReader("y\n"),
+		Stdout:        &stdout,
+		CloneProtocol: "bogus",
+		GitUserName:   func(ctx context.Context) string { return "octocat" },
+		Clone:         failIfCalledClone(t),
+	})
+	if err == nil {
+		t.Fatal("bootstrapConfig() error = nil, want an error for an invalid --clone-protocol")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("bootstrapConfig() error = %q, want it to mention the invalid protocol", err.Error())
+	}
+	if stdout.String() != "" {
+		t.Errorf("Stdout = %q, want empty (prompt must never show before protocol validation)", stdout.String())
 	}
 }

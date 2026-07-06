@@ -104,35 +104,44 @@ func (c Config) Validate() error {
 	}
 }
 
-// configTemplate is the starter config WriteTemplate scaffolds. targetRepo
-// is present but blank — the one field a first-time adopter must fill in —
-// and breakdown is spelled out at its real default so Validate() still
-// passes on the next Load. trailingWindow and machineIdPath are
+// configTemplateData is the JSON shape WriteTemplate scaffolds. It carries
+// only targetRepo and breakdown — trailingWindow and machineIdPath are
 // deliberately omitted rather than spelled out blank: UnmarshalJSON
 // overwrites Breakdown/MachineIDPath onto Default()'s pre-populated values
 // whenever their JSON key is present, even at a zero value, so an explicit
 // blank key here would corrupt those defaults the next time this same file
 // is loaded.
-const configTemplate = `{
-  "targetRepo": "",
-  "breakdown": "per-model"
+type configTemplateData struct {
+	TargetRepo string        `json:"targetRepo"`
+	Breakdown  BreakdownMode `json:"breakdown"`
 }
-`
 
-// WriteTemplate scaffolds a starter config file at path, creating parent
-// directories as needed. It refuses to overwrite an existing file — same
-// atomic O_CREATE|O_EXCL convention as internal/cli/lock.go's
-// writeLockFile — so it's only safe to call once the caller has confirmed
-// no config exists yet at path.
-func WriteTemplate(path string) error {
+// WriteTemplate scaffolds a starter config file at path with targetRepo
+// pre-filled (blank if the caller has nothing to suggest yet), creating
+// parent directories as needed. It refuses to overwrite an existing file —
+// same atomic O_CREATE|O_EXCL convention as internal/cli/lock.go's
+// writeLockFile. targetRepo is JSON-encoded via json.MarshalIndent rather
+// than spliced into a raw string template, so an arbitrary local path (a
+// backslash on Windows, an embedded quote) round-trips safely instead of
+// corrupting the JSON.
+func WriteTemplate(path, targetRepo string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating config directory for %s: %w", path, err)
 	}
+	data, err := json.MarshalIndent(configTemplateData{
+		TargetRepo: targetRepo,
+		Breakdown:  BreakdownPerModel,
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding config template: %w", err)
+	}
+	data = append(data, '\n')
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("creating config %s: %w", path, err)
 	}
-	_, writeErr := f.WriteString(configTemplate)
+	_, writeErr := f.Write(data)
 	closeErr := f.Close()
 	if err := cmp.Or(writeErr, closeErr); err != nil {
 		os.Remove(path)

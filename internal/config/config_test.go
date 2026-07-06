@@ -70,7 +70,7 @@ func TestLoad_InvalidBreakdownIsRejected(t *testing.T) {
 func TestWriteTemplate_CreatesLoadableConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
-	if err := config.WriteTemplate(path); err != nil {
+	if err := config.WriteTemplate(path, ""); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 
@@ -89,7 +89,7 @@ func TestWriteTemplate_CreatesLoadableConfig(t *testing.T) {
 func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
-	if err := config.WriteTemplate(path); err != nil {
+	if err := config.WriteTemplate(path, ""); err != nil {
 		t.Fatalf("WriteTemplate() first call error = %v, want nil", err)
 	}
 	before, err := os.ReadFile(path)
@@ -97,7 +97,7 @@ func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
-	if err := config.WriteTemplate(path); err == nil {
+	if err := config.WriteTemplate(path, ""); err == nil {
 		t.Fatal("WriteTemplate() second call error = nil, want an error for an existing file")
 	}
 
@@ -113,12 +113,47 @@ func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 func TestWriteTemplate_CreatesParentDirs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "deeper", "config.json")
 
-	if err := config.WriteTemplate(path); err != nil {
+	if err := config.WriteTemplate(path, ""); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 
 	if _, err := os.ReadFile(path); err != nil {
 		t.Fatalf("ReadFile() error = %v, want the scaffolded file to be readable", err)
+	}
+}
+
+func TestWriteTemplate_NonEmptyTargetRepo_RoundTripsThroughLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	const targetRepo = "/home/adopter/.token-profile/repos/octocat"
+
+	if err := config.WriteTemplate(path, targetRepo); err != nil {
+		t.Fatalf("WriteTemplate() error = %v, want nil", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != targetRepo {
+		t.Errorf("TargetRepo = %q, want %q", cfg.TargetRepo, targetRepo)
+	}
+	if cfg.Breakdown != config.BreakdownPerModel {
+		t.Errorf("Breakdown = %q, want %q", cfg.Breakdown, config.BreakdownPerModel)
+	}
+}
+
+func TestWriteTemplate_TargetRepoWithBackslashesAndQuotes_RoundTripsThroughLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	const targetRepo = `C:\Users\you\code\"you"`
+
+	if err := config.WriteTemplate(path, targetRepo); err != nil {
+		t.Fatalf("WriteTemplate() error = %v, want nil", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != targetRepo {
+		t.Errorf("TargetRepo = %q, want %q (raw string templating would have corrupted embedded backslashes/quotes)", cfg.TargetRepo, targetRepo)
 	}
 }
 
