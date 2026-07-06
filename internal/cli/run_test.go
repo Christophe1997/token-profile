@@ -16,6 +16,7 @@ import (
 	"github.com/Christophe1997/token-profile/internal/readme"
 	"github.com/Christophe1997/token-profile/internal/render"
 	"github.com/Christophe1997/token-profile/internal/snapshot"
+	"github.com/Christophe1997/token-profile/internal/summary"
 )
 
 // markedReadme is a minimal README already scaffolded with the
@@ -189,7 +190,7 @@ func TestRun_BreakdownLimit_DefaultShowsTopThree(t *testing.T) {
 		{Model: "model-e", Tokens: 100, Cost: 1.0},
 	})
 	deps := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: bin},
 		MachineID: "machine-limit",
 		Now:       time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
@@ -235,7 +236,7 @@ func TestRun_BreakdownLimit_ConfiguredValueOverridesDefault(t *testing.T) {
 		{Model: "model-e", Tokens: 100, Cost: 1.0},
 	})
 	deps := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel, BreakdownLimit: 1},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, BreakdownLimit: 1, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: bin},
 		MachineID: "machine-limit",
 		Now:       time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
@@ -274,7 +275,7 @@ func TestRun_EndToEnd_SoloAdopterRefresh(t *testing.T) {
 	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
 
 	deps := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: bin},
 		MachineID: "machine-solo",
 		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
@@ -384,7 +385,7 @@ func TestRun_RendersWindowOverWindowRateAfterAccumulation(t *testing.T) {
 	// of the default 30-day trailing window).
 	firstBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-05-01", 1000, 10.0)
 	deps := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: firstBin},
 		MachineID: "machine-a",
 		Now:       time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
@@ -431,7 +432,7 @@ func TestRun_MultiMachineMerge(t *testing.T) {
 	workA := cloneWorkdir(t, remote, "machineA")
 	binA := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
 	depsA := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: binA},
 		MachineID: "machine-a",
 		Now:       asOf,
@@ -447,7 +448,7 @@ func TestRun_MultiMachineMerge(t *testing.T) {
 	workB := cloneWorkdir(t, remote, "machineB")
 	binB := fakeAgentsviewBinary(t, "codex", "gpt-5.4", "2026-06-21", 500, 0.75)
 	depsB := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: binB},
 		MachineID: "machine-b",
 		Now:       asOf,
@@ -559,7 +560,7 @@ func TestRun_MultiMachineMerge_RaceDuringRetry(t *testing.T) {
 
 	binB := fakeAgentsviewBinary(t, "codex", "gpt-5.4", "2026-06-21", 500, 0.75)
 	depsB := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: binB},
 		MachineID: "machine-b",
 		Now:       asOf,
@@ -737,7 +738,7 @@ func TestRun_EndToEnd_CardIsFencedAndCollapsible(t *testing.T) {
 	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
 
 	deps := RunDeps{
-		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
 		Client:    &agentsview.Client{BinaryName: bin},
 		MachineID: "machine-solo",
 		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
@@ -817,5 +818,216 @@ func TestRun_ReadmeMissingMarkers_SurfacesErrMarkersMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "init") {
 		t.Errorf("Run() error = %q, want guidance to run `token-profile init`", err.Error())
+	}
+}
+
+// TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles covers AE1: an
+// adopter who has not set RenderMode gets the new SVG card automatically —
+// both light and dark SVG files land on disk under deps.RepoDir, and the
+// README is injected with <picture> markup referencing them instead of the
+// ASCII fence.
+func TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "svg-default")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		// RenderMode deliberately left unset — AE1's premise.
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-svg",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-default")
+
+	for _, relPath := range []string{svgLightRelPath, svgDarkRelPath} {
+		content, err := os.ReadFile(filepath.Join(verify, filepath.FromSlash(relPath)))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v, want the SVG file present", relPath, err)
+		}
+		if !strings.Contains(string(content), "<svg") {
+			t.Errorf("%s content = %q, want it to contain an <svg> element", relPath, content)
+		}
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+	if !strings.Contains(got, "<picture>") {
+		t.Errorf("README missing <picture> markup:\n%s", got)
+	}
+	if !strings.Contains(got, `media="(prefers-color-scheme: dark)"`) {
+		t.Errorf("README missing dark-mode media query:\n%s", got)
+	}
+	if !strings.Contains(got, `srcset="`+svgDarkRelPath+`"`) {
+		t.Errorf("README <source> missing dark SVG path %q:\n%s", svgDarkRelPath, got)
+	}
+	if !strings.Contains(got, `src="`+svgLightRelPath+`"`) {
+		t.Errorf("README <img> missing light SVG path %q:\n%s", svgLightRelPath, got)
+	}
+	if strings.Contains(got, "```") {
+		t.Errorf("README unexpectedly still contains an ASCII fence under the SVG default:\n%s", got)
+	}
+}
+
+// TestRun_SVGMode_FilesTrackedInSameCommitAsReadme covers the Integration
+// scenario: the two SVG files must actually be committed alongside the
+// README update, not left as untracked or uncommitted working-tree files —
+// gitops.Publish only pushes what run()'s files slice names explicitly.
+func TestRun_SVGMode_FilesTrackedInSameCommitAsReadme(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "svg-tracked")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-svg",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	tracked := runGitT(t, work, "ls-tree", "-r", "--name-only", "HEAD")
+	for _, want := range []string{svgLightRelPath, svgDarkRelPath, readmeFile} {
+		if !strings.Contains(tracked, want) {
+			t.Errorf("git ls-tree HEAD = %q, want it to include %q", tracked, want)
+		}
+	}
+
+	status := runGitT(t, work, "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("git status --porcelain = %q, want a clean working tree (SVG files committed, not left untracked)", status)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-tracked")
+	for _, relPath := range []string{svgLightRelPath, svgDarkRelPath} {
+		if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(relPath))); err != nil {
+			t.Errorf("Stat(%s) in a fresh clone error = %v, want the file present (proves it was pushed, not just committed locally)", relPath, err)
+		}
+	}
+}
+
+// TestRun_ASCIIMode_MatchesPriorRenderExactly covers AE2: an explicit ASCII
+// RenderMode must inject byte-for-byte the same content mergeRenderInject's
+// ASCII branch always has — computed independently here via render.Render,
+// fenceCard, and collapsible directly from the same fixture Run() resolves
+// — proving this unit's branch left the ASCII wiring itself unchanged, not
+// just its outward shape (TestRun_EndToEnd_CardIsFencedAndCollapsible
+// covers that).
+func TestRun_ASCIIMode_MatchesPriorRenderExactly(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "ascii-parity")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-ascii",
+		Now:       now,
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-ascii-parity")
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+
+	startIdx := strings.Index(got, readme.StartMarker)
+	endIdx := strings.Index(got, readme.EndMarker)
+	if startIdx == -1 || endIdx == -1 {
+		t.Fatalf("README missing token-profile markers:\n%s", got)
+	}
+	gotInjected := strings.TrimSpace(got[startIdx+len(readme.StartMarker) : endIdx])
+
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
+	}}
+	sum := summary.Compute(ds, now, config.DefaultTrailingWindow)
+	wantCard := render.Render(ds, sum, config.BreakdownPerModel, config.DefaultBreakdownLimit, now)
+	wantSummaryText := render.CardTitle + " — " + render.Headline(sum)
+	wantInjected := collapsible(wantSummaryText, fenceCard(wantCard))
+
+	if gotInjected != wantInjected {
+		t.Errorf("injected ASCII content =\n%s\nwant exactly\n%s", gotInjected, wantInjected)
+	}
+}
+
+// TestRun_SVGMode_SecondRunOverwritesSameFiles covers the edge case: two
+// SVG-mode runs against the same repo must always resolve to the exact
+// same two file paths, with the second run's content replacing the
+// first's rather than accumulating extra files.
+func TestRun_SVGMode_SecondRunOverwritesSameFiles(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "svg-rerun")
+
+	firstBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: firstBin},
+		MachineID: "machine-svg-rerun",
+		Now:       time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("first Run() error = %v, want nil", err)
+	}
+
+	firstLight, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(svgLightRelPath)))
+	if err != nil {
+		t.Fatalf("ReadFile(%s) after first run error = %v", svgLightRelPath, err)
+	}
+
+	secondBin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-21", 2000, 3.0)
+	deps.Client = &agentsview.Client{BinaryName: secondBin}
+	deps.Now = time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("second Run() error = %v, want nil", err)
+	}
+
+	secondLight, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(svgLightRelPath)))
+	if err != nil {
+		t.Fatalf("ReadFile(%s) after second run error = %v", svgLightRelPath, err)
+	}
+	if string(firstLight) == string(secondLight) {
+		t.Errorf("%s content unchanged across runs with different data, want it overwritten with the second run's totals", svgLightRelPath)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(work, ".token-profile", "card-*.svg"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(matches) != 2 {
+		t.Errorf("card-*.svg files on disk = %v, want exactly 2 (no accumulation across runs)", matches)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-rerun")
+	tracked := runGitT(t, verify, "ls-tree", "-r", "--name-only", "HEAD")
+	if svgCount := strings.Count(tracked, ".token-profile/card-"); svgCount != 2 {
+		t.Errorf("tracked card-*.svg entries in HEAD = %d, want exactly 2:\n%s", svgCount, tracked)
 	}
 }

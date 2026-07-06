@@ -8,6 +8,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"os/exec"
@@ -30,6 +31,28 @@ import (
 // readmeFile is the rendered profile's README path, relative to a target
 // repo's root.
 const readmeFile = "README.md"
+
+// svgLightRelPath and svgDarkRelPath are the light/dark dashboard-card SVG
+// files' paths relative to a target repo's root (KTD8), sibling to
+// snapshotRelPath's snapshots directory. Plain forward-slash string
+// constants rather than filepath.Join like snapshotRelPath: unlike a
+// snapshot directory (git-add-only), these paths also become the <picture>
+// markup's srcset/src attribute values, which need "/" regardless of OS.
+const (
+	svgLightRelPath = ".token-profile/card-light.svg"
+	svgDarkRelPath  = ".token-profile/card-dark.svg"
+)
+
+// resolveRenderMode returns mode's effective render mode: mode itself when
+// explicitly set, or config.RenderModeSVG (matching config.Default's own
+// choice, R5/R7) when mode is the zero value. Both run (deciding which SVG
+// paths to commit) and mergeRenderInject (deciding which card to render)
+// call this same helper so the two decisions can't drift apart — RunDeps
+// built directly, e.g. in tests, without going through config.Load/Default
+// otherwise carries a zero RenderMode.
+func resolveRenderMode(mode config.RenderMode) config.RenderMode {
+	return cmp.Or(mode, config.RenderModeSVG)
+}
 
 // RunDeps bundles the explicit dependencies the end-to-end refresh flow
 // (F1: solo adopter refresh, F2: multi-machine merge) needs. Keeping these
@@ -108,6 +131,9 @@ func run(ctx context.Context, deps RunDeps) error {
 	}
 
 	files := []string{snapshotRelPath(deps.MachineID), readmeFile}
+	if resolveRenderMode(deps.Config.RenderMode) == config.RenderModeSVG {
+		files = append(files, svgLightRelPath, svgDarkRelPath)
+	}
 	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
 
 	// regenerate lets gitops.Publish re-derive the README after a rebase
@@ -238,7 +264,6 @@ func mergeRenderInject(deps RunDeps) error {
 	breakdownLimit := cmp.Or(deps.Config.BreakdownLimit, config.DefaultBreakdownLimit)
 
 	sum := summary.Compute(merged, deps.Now, window)
-	card := render.Render(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
 
 	readmePath := filepath.Join(deps.RepoDir, readmeFile)
 	readmeBytes, err := os.ReadFile(readmePath)
@@ -246,8 +271,20 @@ func mergeRenderInject(deps RunDeps) error {
 		return fmt.Errorf("reading README %s: %w", readmePath, err)
 	}
 
+	var body string
+	switch resolveRenderMode(deps.Config.RenderMode) {
+	case config.RenderModeASCII:
+		card := render.Render(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
+		body = fenceCard(card)
+	default: // config.RenderModeSVG
+		body, err = svgCardBody(deps, current, sum, breakdownLimit)
+		if err != nil {
+			return err
+		}
+	}
+
 	summaryText := render.CardTitle + " — " + render.Headline(sum)
-	updated, err := readme.Inject(readmeBytes, collapsible(summaryText, fenceCard(card)))
+	updated, err := readme.Inject(readmeBytes, collapsible(summaryText, body))
 	if err != nil {
 		// readme.Inject's own error already wraps ErrMarkersMissing with
 		// guidance to run `token-profile init`; wrapping again here only
@@ -260,6 +297,49 @@ func mergeRenderInject(deps RunDeps) error {
 		return fmt.Errorf("writing README %s: %w", readmePath, err)
 	}
 
+	return nil
+}
+
+// svgCardBody renders the SVG dashboard card's light/dark variants, writes
+// them under deps.RepoDir at svgLightRelPath/svgDarkRelPath (KTD8), and
+// returns the <picture>+attribution markup that becomes fenceCard's
+// SVG-mode counterpart. The attribution line sits after a blank line,
+// outside the <picture> block, matching fenceCard's own placement of
+// render.GeneratedByLine() outside the ASCII card's fence (R2).
+func svgCardBody(deps RunDeps, current snapshot.MergedDataset, sum summary.Summary, breakdownLimit int) (string, error) {
+	light, dark, err := render.RenderSVG(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
+	if err != nil {
+		return "", fmt.Errorf("rendering SVG card: %w", err)
+	}
+
+	if err := writeCardFile(deps.RepoDir, svgLightRelPath, light); err != nil {
+		return "", err
+	}
+	if err := writeCardFile(deps.RepoDir, svgDarkRelPath, dark); err != nil {
+		return "", err
+	}
+
+	alt := html.EscapeString(render.AltText(current, sum))
+	picture := fmt.Sprintf(
+		`<picture><source media="(prefers-color-scheme: dark)" srcset="%s"><img src="%s" alt="%s" width="100%%"></picture>`,
+		svgDarkRelPath, svgLightRelPath, alt,
+	)
+	return picture + "\n\n" + render.GeneratedByLine(), nil
+}
+
+// writeCardFile writes content to relPath under repoDir, creating any
+// missing parent directories first: mergeRenderInject can run before
+// .token-profile/ exists on disk (a machine's very first run), so this
+// can't assume the directory snapshot.Write happens to also use is already
+// there.
+func writeCardFile(repoDir, relPath, content string) error {
+	path := filepath.Join(repoDir, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating directory for %s: %w", relPath, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", relPath, err)
+	}
 	return nil
 }
 
