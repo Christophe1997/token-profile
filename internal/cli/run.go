@@ -195,8 +195,13 @@ func requireGitWorkTree(ctx context.Context, repoDir string) error {
 // itself stays fence-free (render_test.go's golden file and border-prefix
 // assertions depend on Render's raw box() output) — fencing is strictly an
 // injection-site concern.
+//
+// The attribution line (render.GeneratedByLine) is appended after the
+// closing fence rather than inside card: CommonMark renders markdown syntax
+// literally inside a fenced code block, so a markdown link only renders as
+// an actual clickable link placed outside one.
 func fenceCard(card string) string {
-	return "```\n" + card + "\n```"
+	return "```\n" + card + "\n```\n\n" + render.GeneratedByLine()
 }
 
 // mergeRenderInject re-derives the merged dataset from every machine's

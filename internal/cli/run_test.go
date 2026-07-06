@@ -14,6 +14,7 @@ import (
 	"github.com/Christophe1997/token-profile/internal/agentsview"
 	"github.com/Christophe1997/token-profile/internal/config"
 	"github.com/Christophe1997/token-profile/internal/readme"
+	"github.com/Christophe1997/token-profile/internal/render"
 	"github.com/Christophe1997/token-profile/internal/snapshot"
 )
 
@@ -696,11 +697,12 @@ func TestRun_Success_PrintsHeadlineAndCommitHash(t *testing.T) {
 }
 
 // TestFenceCard verifies fenceCard wraps its input in a plain (no language
-// tag) fenced code block with no trailing newline after the closing fence,
-// matching README.md's own Quick Start example.
+// tag) fenced code block, matching README.md's own Quick Start example, and
+// appends the attribution line after the closing fence — outside the code
+// block, where CommonMark actually renders its markdown link.
 func TestFenceCard(t *testing.T) {
 	got := fenceCard("a\nb")
-	want := "```\na\nb\n```"
+	want := "```\na\nb\n```\n\n" + render.GeneratedByLine()
 	if got != want {
 		t.Errorf("fenceCard() = %q, want %q", got, want)
 	}
@@ -709,7 +711,9 @@ func TestFenceCard(t *testing.T) {
 // TestRun_EndToEnd_CardIsFenced covers the bug fix: the injected card must
 // be wrapped in a plain fenced code block, so GitHub/CommonMark rendering
 // preserves its box-drawing characters and column alignment verbatim
-// instead of mangling them as inline markdown.
+// instead of mangling them as inline markdown. The attribution line must
+// land after the closing fence, not inside it, so its markdown link
+// actually renders instead of showing up as literal brackets.
 func TestRun_EndToEnd_CardIsFenced(t *testing.T) {
 	remote := initBareRemote(t)
 	seedRemote(t, remote, markedReadme)
@@ -746,8 +750,15 @@ func TestRun_EndToEnd_CardIsFenced(t *testing.T) {
 	if !strings.HasPrefix(injected, "```") {
 		t.Errorf("injected content = %q, want it to start with a fenced code block", injected)
 	}
-	if !strings.HasSuffix(injected, "```") {
-		t.Errorf("injected content = %q, want it to end with a fenced code block", injected)
+	fenceEnd := strings.Index(injected, "\n```\n")
+	if fenceEnd == -1 {
+		t.Fatalf("injected content = %q, want a closing fence on its own line", injected)
+	}
+	if !strings.HasSuffix(injected, render.GeneratedByLine()) {
+		t.Errorf("injected content = %q, want it to end with the attribution line", injected)
+	}
+	if idx := strings.Index(injected, render.GeneratedByLine()); idx < fenceEnd {
+		t.Errorf("injected content has the attribution line before the closing fence: %q", injected)
 	}
 }
 
