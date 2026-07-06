@@ -70,6 +70,9 @@ func Write(targetRepo, machineID string, rows []Row) error {
 			return fmt.Errorf("row %d: %w", i, err)
 		}
 		r.Date = date
+		if r.Tokens < 0 || r.Cost < 0 {
+			return fmt.Errorf("row %d: negative tokens (%d) or cost (%g) — a corrupted or malformed source value, not real usage", i, r.Tokens, r.Cost)
+		}
 		normalized[i] = r
 	}
 

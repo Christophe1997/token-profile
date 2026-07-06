@@ -126,6 +126,28 @@ func TestWrite_RejectsMalformedDate(t *testing.T) {
 	}
 }
 
+// TestWrite_RejectsNegativeTokensOrCost guards against a corrupted or
+// malformed agentsview response producing a negative token/cost value that
+// would otherwise silently skew merged totals (or, summed against enough
+// legitimate rows, drag a total negative).
+func TestWrite_RejectsNegativeTokensOrCost(t *testing.T) {
+	tests := []struct {
+		name string
+		row  snapshot.Row
+	}{
+		{"negative tokens", snapshot.Row{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: -1, Cost: 0.1}},
+		{"negative cost", snapshot.Row{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1, Cost: -0.1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := snapshot.Write(dir, "machine-a", []snapshot.Row{tt.row}); err == nil {
+				t.Fatalf("Write() error = nil, want an error for row %+v", tt.row)
+			}
+		})
+	}
+}
+
 // mergedRow finds the row in ds matching (date, agent, model), failing the
 // test if it's absent.
 func mergedRow(t *testing.T, ds snapshot.MergedDataset, date, agent, model string) snapshot.Row {
