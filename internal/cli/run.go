@@ -6,7 +6,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -232,7 +231,7 @@ func NewRunCmd() *cobra.Command {
 				return fmt.Errorf("loading config %s: %w", configPath, err)
 			}
 			if cfg.TargetRepo == "" {
-				return errors.New(`no target repo configured: set "targetRepo" in your config file (see --config)`)
+				return errTargetRepoMissing
 			}
 
 			machineID, err := machineid.Load(cfg.MachineIDPath)
@@ -256,12 +255,19 @@ func NewRunCmd() *cobra.Command {
 }
 
 // defaultConfigPath returns the default config file location,
-// ~/.token-profile/config.json, mirroring config.defaultMachineIDPath's own
-// convention for where token-profile keeps its local state.
+// ~/.token-profile/config.json.
 func defaultConfigPath() string {
+	return defaultStateFile("config.json")
+}
+
+// defaultStateFile returns name's path under token-profile's local state
+// directory, ~/.token-profile, mirroring config.defaultMachineIDPath's own
+// convention for where token-profile keeps its local state. Returns "" if
+// the home directory can't be resolved, same as callers already handle.
+func defaultStateFile(name string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".token-profile", "config.json")
+	return filepath.Join(home, ".token-profile", name)
 }

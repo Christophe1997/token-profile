@@ -198,15 +198,11 @@ func schedulingEntryContent(goos, binaryPath, configPath string) string {
 // or `crontab`), not the live crontab/LaunchAgents location itself — init
 // never edits an adopter's real schedule unattended.
 func defaultScheduleDest() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
 	name := "schedule.cron"
 	if runtime.GOOS == "darwin" {
 		name = "schedule.plist"
 	}
-	return filepath.Join(home, ".token-profile", name)
+	return defaultStateFile(name)
 }
 
 // NewInitCmd builds the `token-profile init` cobra command: a thin wrapper
