@@ -5,6 +5,7 @@ date: 2026-07-03
 topic: github-token-profile
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
+status: completed
 product_contract_source: ce-brainstorm
 execution: code
 deepened: 2026-07-03
