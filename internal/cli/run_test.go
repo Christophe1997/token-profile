@@ -421,6 +421,62 @@ func TestRun_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
 	}
 }
 
+// TestFenceCard verifies fenceCard wraps its input in a plain (no language
+// tag) fenced code block with no trailing newline after the closing fence,
+// matching README.md's own Quick Start example.
+func TestFenceCard(t *testing.T) {
+	got := fenceCard("a\nb")
+	want := "```\na\nb\n```"
+	if got != want {
+		t.Errorf("fenceCard() = %q, want %q", got, want)
+	}
+}
+
+// TestRun_EndToEnd_CardIsFenced covers the bug fix: the injected card must
+// be wrapped in a plain fenced code block, so GitHub/CommonMark rendering
+// preserves its box-drawing characters and column alignment verbatim
+// instead of mangling them as inline markdown.
+func TestRun_EndToEnd_CardIsFenced(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-solo",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify")
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+
+	startIdx := strings.Index(got, readme.StartMarker)
+	endIdx := strings.Index(got, readme.EndMarker)
+	if startIdx == -1 || endIdx == -1 || endIdx < startIdx {
+		t.Fatalf("README missing token-profile markers:\n%s", got)
+	}
+	injected := strings.TrimSpace(got[startIdx+len(readme.StartMarker) : endIdx])
+
+	if !strings.HasPrefix(injected, "```") {
+		t.Errorf("injected content = %q, want it to start with a fenced code block", injected)
+	}
+	if !strings.HasSuffix(injected, "```") {
+		t.Errorf("injected content = %q, want it to end with a fenced code block", injected)
+	}
+}
+
 // TestRun_ReadmeMissingMarkers_SurfacesErrMarkersMissing covers the error
 // path: a target repo whose README lacks the token-profile markers must
 // fail with an actionable error surfacing readme.ErrMarkersMissing, rather

@@ -138,6 +138,17 @@ func requireGitWorkTree(ctx context.Context, repoDir string) error {
 	return nil
 }
 
+// fenceCard wraps card in a plain (no language tag) fenced code block,
+// matching README.md's own Quick Start example, so GitHub/CommonMark
+// rendering preserves the card's box-drawing characters and column
+// alignment verbatim instead of mangling them as inline markdown. Render
+// itself stays fence-free (render_test.go's golden file and border-prefix
+// assertions depend on Render's raw box() output) — fencing is strictly an
+// injection-site concern.
+func fenceCard(card string) string {
+	return "```\n" + card + "\n```"
+}
+
 // mergeRenderInject re-derives the merged dataset from every machine's
 // snapshot currently on disk under deps.RepoDir, computes the summary,
 // renders the dashboard card, and injects it into the target repo's
@@ -160,7 +171,7 @@ func mergeRenderInject(deps RunDeps) error {
 		return fmt.Errorf("reading README %s: %w", readmePath, err)
 	}
 
-	updated, err := readme.Inject(readmeBytes, card)
+	updated, err := readme.Inject(readmeBytes, fenceCard(card))
 	if err != nil {
 		// readme.Inject's own error already wraps ErrMarkersMissing with
 		// guidance to run `token-profile init`; wrapping again here only
