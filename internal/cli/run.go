@@ -204,6 +204,16 @@ func fenceCard(card string) string {
 	return "```\n" + card + "\n```\n\n" + render.GeneratedByLine()
 }
 
+// collapsible wraps body in a <details> block so the card doesn't dominate
+// a profile README by default, with summaryText as the always-visible
+// toggle label. The blank lines around body are required, not cosmetic:
+// GitHub's markdown parser only processes markdown (e.g. body's fenced
+// code block) nested inside a raw HTML block when it's set off by blank
+// lines — without them the fence renders as literal HTML text.
+func collapsible(summaryText, body string) string {
+	return "<details>\n<summary>" + summaryText + "</summary>\n\n" + body + "\n\n</details>"
+}
+
 // mergeRenderInject re-derives the merged dataset from every machine's
 // snapshot currently on disk under deps.RepoDir, computes the summary,
 // renders the dashboard card, and injects it into the target repo's
@@ -236,7 +246,8 @@ func mergeRenderInject(deps RunDeps) error {
 		return fmt.Errorf("reading README %s: %w", readmePath, err)
 	}
 
-	updated, err := readme.Inject(readmeBytes, fenceCard(card))
+	summaryText := render.CardTitle + " — " + render.Headline(sum)
+	updated, err := readme.Inject(readmeBytes, collapsible(summaryText, fenceCard(card)))
 	if err != nil {
 		// readme.Inject's own error already wraps ErrMarkersMissing with
 		// guidance to run `token-profile init`; wrapping again here only

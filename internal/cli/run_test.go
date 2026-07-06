@@ -708,13 +708,28 @@ func TestFenceCard(t *testing.T) {
 	}
 }
 
-// TestRun_EndToEnd_CardIsFenced covers the bug fix: the injected card must
-// be wrapped in a plain fenced code block, so GitHub/CommonMark rendering
-// preserves its box-drawing characters and column alignment verbatim
-// instead of mangling them as inline markdown. The attribution line must
-// land after the closing fence, not inside it, so its markdown link
-// actually renders instead of showing up as literal brackets.
-func TestRun_EndToEnd_CardIsFenced(t *testing.T) {
+// TestCollapsible verifies collapsible wraps body in a <details> block with
+// summaryText as the toggle label, keeping the blank lines GitHub's
+// markdown parser requires around markdown nested inside an HTML block —
+// without them, a fenced code block inside would render as literal text
+// rather than being parsed as markdown.
+func TestCollapsible(t *testing.T) {
+	got := collapsible("Tokens: 100", "```\ncard\n```")
+	want := "<details>\n<summary>Tokens: 100</summary>\n\n```\ncard\n```\n\n</details>"
+	if got != want {
+		t.Errorf("collapsible() = %q, want %q", got, want)
+	}
+}
+
+// TestRun_EndToEnd_CardIsFencedAndCollapsible covers the injected card's
+// full structure: a <details> block (so the card doesn't dominate profile
+// README real estate by default) wrapping a plain fenced code block (so
+// GitHub/CommonMark rendering preserves the card's box-drawing characters
+// and column alignment verbatim instead of mangling them as inline
+// markdown), with the attribution line after the closing fence — inside
+// the fence, CommonMark would render its markdown link as literal
+// brackets instead of an actual link.
+func TestRun_EndToEnd_CardIsFencedAndCollapsible(t *testing.T) {
 	remote := initBareRemote(t)
 	seedRemote(t, remote, markedReadme)
 
@@ -747,18 +762,30 @@ func TestRun_EndToEnd_CardIsFenced(t *testing.T) {
 	}
 	injected := strings.TrimSpace(got[startIdx+len(readme.StartMarker) : endIdx])
 
-	if !strings.HasPrefix(injected, "```") {
-		t.Errorf("injected content = %q, want it to start with a fenced code block", injected)
+	if !strings.HasPrefix(injected, "<details>\n<summary>") {
+		t.Errorf("injected content = %q, want it to start with a <details><summary> wrapper", injected)
 	}
-	fenceEnd := strings.Index(injected, "\n```\n")
-	if fenceEnd == -1 {
-		t.Fatalf("injected content = %q, want a closing fence on its own line", injected)
+	if !strings.HasSuffix(injected, "</details>") {
+		t.Errorf("injected content = %q, want it to end with </details>", injected)
 	}
-	if !strings.HasSuffix(injected, render.GeneratedByLine()) {
-		t.Errorf("injected content = %q, want it to end with the attribution line", injected)
+
+	summaryEnd := strings.Index(injected, "</summary>")
+	fenceOpen := strings.Index(injected, "```")
+	fenceClose := -1
+	if fenceOpen != -1 {
+		if rel := strings.Index(injected[fenceOpen+3:], "\n```\n"); rel != -1 {
+			fenceClose = fenceOpen + 3 + rel
+		}
 	}
-	if idx := strings.Index(injected, render.GeneratedByLine()); idx < fenceEnd {
-		t.Errorf("injected content has the attribution line before the closing fence: %q", injected)
+	attribution := strings.Index(injected, render.GeneratedByLine())
+
+	if summaryEnd == -1 || fenceOpen == -1 || fenceClose == -1 || attribution == -1 {
+		t.Fatalf("injected content missing an expected part: summaryEnd=%d fenceOpen=%d fenceClose=%d attribution=%d\ninjected:\n%s",
+			summaryEnd, fenceOpen, fenceClose, attribution, injected)
+	}
+	if !(summaryEnd < fenceOpen && fenceOpen < fenceClose && fenceClose < attribution) {
+		t.Errorf("injected content out of order: summaryEnd=%d fenceOpen=%d fenceClose=%d attribution=%d\ninjected:\n%s",
+			summaryEnd, fenceOpen, fenceClose, attribution, injected)
 	}
 }
 

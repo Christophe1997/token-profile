@@ -26,9 +26,11 @@ import (
 // panics on an empty series rather than rendering something meaningful.
 const noDataMessage = "No data yet — run token-profile to record your first day."
 
-// cardTitle is the dashboard card's heading — its first content line —
-// identifying the card before any usage data.
-const cardTitle = "Token Profile"
+// CardTitle is the dashboard card's heading — its first content line —
+// identifying the card before any usage data. Exported so callers building
+// UI around the card (e.g. cli's collapsible-section summary) can reuse the
+// same label rather than duplicating the literal.
+const CardTitle = "Token Profile"
 
 // repoURL is token-profile's own repo, credited via GeneratedByLine so
 // anyone who sees the rendered card in a README can find the tool that
@@ -42,14 +44,14 @@ const repoURL = "https://github.com/Christophe1997/token-profile"
 func titleLine(ds snapshot.MergedDataset) string {
 	dates, _ := dailyTokenTotals(ds.Rows)
 	if len(dates) == 0 {
-		return cardTitle
+		return CardTitle
 	}
 	days := statDurationDays(dates[0], dates[len(dates)-1])
 	unit := "days"
 	if days == 1 {
 		unit = "day"
 	}
-	return fmt.Sprintf("%s — last %d %s", cardTitle, days, unit)
+	return fmt.Sprintf("%s — last %d %s", CardTitle, days, unit)
 }
 
 // statDurationDays returns the inclusive number of calendar days spanned by
