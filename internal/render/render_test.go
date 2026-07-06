@@ -188,6 +188,29 @@ func TestRender_TrendGraphGroupsByDateSummingTokens(t *testing.T) {
 	}
 }
 
+// TestRender_SingleDayDataset_NoDuplicateAxisLabel covers a brand-new
+// adopter's first tracked day: exactly one distinct date must not confuse
+// asciigraph's tick placement into printing the same date label twice along
+// the x-axis (a degenerate zero-width XAxisRange with tickCount forced to
+// 2 with only one real point to place them at).
+func TestRender_SingleDayDataset_NoDuplicateAxisLabel(t *testing.T) {
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+	}}
+	asOf := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf)
+	// renderedAt deliberately differs from the dataset's sole date, so the
+	// "Last updated" line's own (legitimately different) date can't be
+	// mistaken for a second trend-graph occurrence of "07-01".
+	renderedAt := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+
+	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+
+	if got := strings.Count(out, "07-01"); got != 1 {
+		t.Errorf("Render() trend graph shows date label \"07-01\" %d times, want exactly 1:\n%s", got, out)
+	}
+}
+
 // TestRender_GoldenFile locks in the exact rendered layout for a realistic
 // fixture, once the behavior tests above have settled the format. Written
 // last per the plan, so this test isn't fighting an evolving layout.

@@ -53,6 +53,14 @@ func trendLines(ds snapshot.MergedDataset) []string {
 		return []string{"Trend:", noDataMessage}
 	}
 	dates, tokens := dailyTokenTotals(ds.Rows)
+	if len(dates) == 1 {
+		// asciigraph's tick placement is undefined on a single point: with
+		// only one x-axis position to place them at, a tick count forced up
+		// to its minimum of 2 (XAxisRange(0, 0)) prints the same date label
+		// twice rather than once. A single explicit line is both correct
+		// and simpler than coaxing asciigraph through a degenerate plot.
+		return []string{"Trend:", fmt.Sprintf("  %s: %s tokens", shortDate(dates[0]), formatTokens(int64(tokens[0])))}
+	}
 	// A narrow default width crowds ticks together, so asciigraph rounds
 	// several distinct x-axis positions to the same day and prints
 	// duplicate/missing date labels. Widening the plot in proportion to the
@@ -196,12 +204,9 @@ func lastUpdatedLine(renderedAt time.Time) string {
 // 12345 -> "12,345").
 func formatTokens(n int64) string {
 	s := strconv.FormatInt(n, 10)
-	neg := strings.HasPrefix(s, "-")
-	if neg {
-		s = s[1:]
-	}
+	s, neg := strings.CutPrefix(s, "-")
 	var out strings.Builder
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if i > 0 && (len(s)-i)%3 == 0 {
 			out.WriteByte(',')
 		}
