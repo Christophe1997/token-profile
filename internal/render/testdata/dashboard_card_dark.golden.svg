@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="520" viewBox="0 0 640 520" role="img" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Token Profile — last 3 days</title>
+<rect width="100%" height="100%" fill="#0d1117"/>
+<rect x="1" y="1" width="638" height="518" rx="12" fill="none" stroke="#30363d" stroke-width="2"/>
+<text x="32" y="40" font-size="22" font-weight="600" fill="#58a6ff">Token Profile — last 3 days</text>
+<line x1="32" y1="56" x2="608" y2="56" stroke="#30363d" stroke-width="1"/>
+
+
+<text x="32" y="84" font-size="12" font-weight="600" letter-spacing="1" fill="#8b949e">TOKENS</text>
+<text x="32" y="118" font-size="26" font-weight="700" fill="#c9d1d9">4,100</text>
+
+<text x="332" y="84" font-size="12" font-weight="600" letter-spacing="1" fill="#8b949e">COST</text>
+<text x="332" y="118" font-size="26" font-weight="700" fill="#c9d1d9">$6.95</text>
+
+<text x="32" y="152" font-size="12" font-weight="600" letter-spacing="1" fill="#8b949e">TREND</text>
+<line x1="90" y1="288" x2="608" y2="288" stroke="#21262d" stroke-width="1"/>
+
+<polyline points="90,204 349,168 608,288" fill="none" stroke="#58a6ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="90" y="306" font-size="12" fill="#8b949e">06-20</text>
+<text x="608" y="306" font-size="12" fill="#8b949e" text-anchor="end">06-22</text>
+<text x="82" y="172" font-size="12" fill="#8b949e" text-anchor="end">1,800</text>
+<text x="82" y="288" font-size="12" fill="#8b949e" text-anchor="end">800</text>
+
+<text x="32" y="328" font-size="16" font-weight="600" fill="#c9d1d9">Streak: 3 days</text>
+<text x="32" y="360" font-size="12" font-weight="600" letter-spacing="1" fill="#8b949e">Breakdown (per model):</text>
+
+<text x="32" y="384" font-size="13" fill="#c9d1d9">claude-sonnet-5</text>
+<text x="420" y="384" font-size="13" fill="#8b949e" text-anchor="end">2,200</text>
+<text x="608" y="384" font-size="13" fill="#8b949e" text-anchor="end">$3.30</text>
+
+<text x="32" y="406" font-size="13" fill="#c9d1d9">gpt-5.4</text>
+<text x="420" y="406" font-size="13" fill="#8b949e" text-anchor="end">1,100</text>
+<text x="608" y="406" font-size="13" fill="#8b949e" text-anchor="end">$1.65</text>
+
+<text x="32" y="428" font-size="13" fill="#c9d1d9">claude-opus-5</text>
+<text x="420" y="428" font-size="13" fill="#8b949e" text-anchor="end">800</text>
+<text x="608" y="428" font-size="13" fill="#8b949e" text-anchor="end">$2.00</text>
+
+
+
+<text x="32" y="504" font-size="11" fill="#8b949e">Last updated: 2026-06-22 14:30 UTC</text>
+</svg>
