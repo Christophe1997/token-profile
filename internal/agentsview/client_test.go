@@ -49,15 +49,16 @@ func TestParseUsageDaily_RealClaudeFixture(t *testing.T) {
 
 	// Spot-check one specific row against the fixture's raw numbers:
 	// 2026-06-25 claude-opus-4-8: inputTokens=951828, outputTokens=718247,
-	// cacheReadTokens=151434047 (excluded), cost=121.38727599999999.
+	// cacheCreationTokens=3672790, cacheReadTokens=151434047,
+	// cost=121.38727599999999.
 	var found bool
 	for _, row := range got.Daily {
 		if row.Date == "2026-06-25" && row.Model == "claude-opus-4-8" {
 			found = true
-			const wantTokens = 951828 + 718247 // conversation tokens only, no cache
+			const wantTokens = 951828 + 718247 + 3672790 + 151434047
 			const wantCost = 121.38727599999999
 			if row.Tokens != wantTokens {
-				t.Errorf("2026-06-25/claude-opus-4-8 Tokens = %d, want %d (input+output only, cache excluded)", row.Tokens, wantTokens)
+				t.Errorf("2026-06-25/claude-opus-4-8 Tokens = %d, want %d (input+output+cache creation+cache read)", row.Tokens, wantTokens)
 			}
 			if row.Cost != wantCost {
 				t.Errorf("2026-06-25/claude-opus-4-8 Cost = %v, want %v", row.Cost, wantCost)
@@ -70,6 +71,7 @@ func TestParseUsageDaily_RealClaudeFixture(t *testing.T) {
 
 	// Sum of flattened row tokens/cost must reconcile with the fixture's
 	// top-level totals (inputTokens=7423972, outputTokens=3302262,
+	// cacheCreationTokens=19132594, cacheReadTokens=442971864,
 	// totalCost=400.4263420999999).
 	var sumTokens int64
 	var sumCost float64
@@ -77,9 +79,9 @@ func TestParseUsageDaily_RealClaudeFixture(t *testing.T) {
 		sumTokens += row.Tokens
 		sumCost += row.Cost
 	}
-	const wantTotalTokens = 7423972 + 3302262
+	const wantTotalTokens = 7423972 + 3302262 + 19132594 + 442971864
 	if sumTokens != wantTotalTokens {
-		t.Errorf("sum of row Tokens = %d, want %d (matching fixture totals.inputTokens+outputTokens)", sumTokens, wantTotalTokens)
+		t.Errorf("sum of row Tokens = %d, want %d (matching fixture totals.inputTokens+outputTokens+cacheCreationTokens+cacheReadTokens)", sumTokens, wantTotalTokens)
 	}
 	const wantTotalCost = 400.4263420999999
 	if math.Abs(sumCost-wantTotalCost) > 1e-6 {
@@ -125,16 +127,17 @@ func TestParseUsageDaily_FlattensModelBreakdownsPerDay(t *testing.T) {
 	}
 
 	want := []DailyRow{
-		{Date: "2026-06-20", Agent: "claude", Model: "claude-sonnet-5", Tokens: 300, Cost: 1.23},
-		{Date: "2026-06-20", Agent: "claude", Model: "claude-haiku-4-5", Tokens: 30, Cost: 0.05},
-		{Date: "2026-06-21", Agent: "claude", Model: "claude-sonnet-5", Tokens: 700, Cost: 2.34},
+		{Date: "2026-06-20", Agent: "claude", Model: "claude-sonnet-5", Tokens: 100 + 200 + 50 + 900, Cost: 1.23},
+		{Date: "2026-06-20", Agent: "claude", Model: "claude-haiku-4-5", Tokens: 10 + 20 + 5 + 90, Cost: 0.05},
+		{Date: "2026-06-21", Agent: "claude", Model: "claude-sonnet-5", Tokens: 300 + 400 + 60 + 950, Cost: 2.34},
 	}
 	if !slices.Equal(got.Daily, want) {
 		t.Errorf("Daily = %+v, want %+v", got.Daily, want)
 	}
 
-	if got.Totals != (Totals{Tokens: 1030, Cost: 3.62}) {
-		t.Errorf("Totals = %+v, want {Tokens: 1030, Cost: 3.62}", got.Totals)
+	const wantTotalTokens = 410 + 620 + 115 + 1940
+	if got.Totals != (Totals{Tokens: wantTotalTokens, Cost: 3.62}) {
+		t.Errorf("Totals = %+v, want {Tokens: %d, Cost: 3.62}", got.Totals, wantTotalTokens)
 	}
 }
 
@@ -175,12 +178,12 @@ func TestParseUsageDaily_AttributesAgentFromRequestNotJSON(t *testing.T) {
 	}
 }
 
-// TestParseUsageDaily_TokensExcludeCacheTokens covers the deliberate design
-// choice documented on DailyRow: Tokens counts only
-// inputTokens+outputTokens. Real usage data can have cacheReadTokens ~100x
-// larger than inputTokens, and folding those in would make the headline
-// "tokens used" number reflect cache mechanics rather than actual work.
-func TestParseUsageDaily_TokensExcludeCacheTokens(t *testing.T) {
+// TestParseUsageDaily_TokensIncludeCacheTokens covers Tokens' definition:
+// inputTokens+outputTokens+cacheCreationTokens+cacheReadTokens. Cost already
+// reflects cache read/write pricing, so a Tokens count that dropped cache
+// tokens would make the headline cost-per-token ratio look nonsensical
+// against the cost actually billed.
+func TestParseUsageDaily_TokensIncludeCacheTokens(t *testing.T) {
 	const fixture = `{
 		"daily": [
 			{
@@ -198,12 +201,12 @@ func TestParseUsageDaily_TokensExcludeCacheTokens(t *testing.T) {
 		t.Fatalf("parseUsageDaily() error = %v, want nil", err)
 	}
 
-	const wantTokens = 1000 + 500 // NOT +200000+90000000
+	const wantTokens = 1000 + 500 + 200000 + 90000000
 	if got.Daily[0].Tokens != wantTokens {
-		t.Errorf("Daily[0].Tokens = %d, want %d (cache tokens must be excluded)", got.Daily[0].Tokens, wantTokens)
+		t.Errorf("Daily[0].Tokens = %d, want %d (cache tokens must be included)", got.Daily[0].Tokens, wantTokens)
 	}
 	if got.Totals.Tokens != wantTokens {
-		t.Errorf("Totals.Tokens = %d, want %d (cache tokens must be excluded)", got.Totals.Tokens, wantTokens)
+		t.Errorf("Totals.Tokens = %d, want %d (cache tokens must be included)", got.Totals.Tokens, wantTokens)
 	}
 }
 

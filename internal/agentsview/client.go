@@ -80,11 +80,11 @@ type FetchOptions struct {
 // once per known agent (--agent set), so for every row this code actually
 // produces in production, FetchOptions.Agent is exact and unambiguous.
 //
-// Token definition: Tokens is deliberately inputTokens+outputTokens only —
-// it excludes cacheCreationTokens/cacheReadTokens. Observed real usage has
-// cacheReadTokens over 100x inputTokens on some days; folding cache tokens
-// in would make the headline "tokens used" number reflect cache mechanics
-// rather than meaningful conversational usage.
+// Token definition: Tokens is inputTokens+outputTokens+cacheCreationTokens+
+// cacheReadTokens — every token dimension the API reports. Cost already
+// reflects cache read/write pricing, so excluding cache tokens from Tokens
+// would decouple the headline "tokens used" number from the cost billed
+// against it.
 type DailyRow struct {
 	Date   string
 	Agent  string
@@ -94,10 +94,10 @@ type DailyRow struct {
 }
 
 // Totals aggregates Tokens/Cost using the same definitions as DailyRow
-// (conversation tokens only, cache excluded). It doubles as the decoded
-// shape of the API's top-level `totals` object (via rawTotals) and as the
-// return type of Dataset's aggregation methods (resolve.go), so the two are
-// directly comparable.
+// (every token dimension included). It doubles as the decoded shape of the
+// API's top-level `totals` object (via rawTotals) and as the return type of
+// Dataset's aggregation methods (resolve.go), so the two are directly
+// comparable.
 type Totals struct {
 	Tokens int64
 	Cost   float64
@@ -221,7 +221,7 @@ func fetchSessionListPage(ctx context.Context, path, cursor string) (*sessionLis
 // see internal/agentsview/testdata/real_usage_daily_claude.json). Only the
 // fields parseUsageDaily's flattening needs are declared; per agentsview's
 // own additive-schema guidance, every other field (projectBreakdowns,
-// agentBreakdowns, modelsUsed, sessionCounts, cache token counts, etc.) is
+// agentBreakdowns, modelsUsed, sessionCounts, cacheSavings, etc.) is
 // ignored — encoding/json does this by default, so no extra code is needed.
 type rawUsageDaily struct {
 	Daily  []rawDailyEntry `json:"daily"`
@@ -238,17 +238,31 @@ type rawDailyEntry struct {
 // rawBreakdown is one entry of a rawDailyEntry's `modelBreakdowns[]` — one
 // per model used that day (scoped to the requested --agent, if any).
 type rawBreakdown struct {
-	ModelName    string  `json:"modelName"`
-	InputTokens  int64   `json:"inputTokens"`
-	OutputTokens int64   `json:"outputTokens"`
-	Cost         float64 `json:"cost"`
+	ModelName           string  `json:"modelName"`
+	InputTokens         int64   `json:"inputTokens"`
+	OutputTokens        int64   `json:"outputTokens"`
+	CacheCreationTokens int64   `json:"cacheCreationTokens"`
+	CacheReadTokens     int64   `json:"cacheReadTokens"`
+	Cost                float64 `json:"cost"`
 }
 
 // rawTotals is the real top-level `totals` object.
 type rawTotals struct {
-	InputTokens  int64   `json:"inputTokens"`
-	OutputTokens int64   `json:"outputTokens"`
-	TotalCost    float64 `json:"totalCost"`
+	InputTokens         int64   `json:"inputTokens"`
+	OutputTokens        int64   `json:"outputTokens"`
+	CacheCreationTokens int64   `json:"cacheCreationTokens"`
+	CacheReadTokens     int64   `json:"cacheReadTokens"`
+	TotalCost           float64 `json:"totalCost"`
+}
+
+// tokens sums every token dimension the API reports (see DailyRow's doc
+// comment for why cache tokens are included).
+func (t rawTotals) tokens() int64 {
+	return t.InputTokens + t.OutputTokens + t.CacheCreationTokens + t.CacheReadTokens
+}
+
+func (b rawBreakdown) tokens() int64 {
+	return b.InputTokens + b.OutputTokens + b.CacheCreationTokens + b.CacheReadTokens
 }
 
 // parseUsageDaily decodes agentsview's `usage daily --json --breakdown`
@@ -263,7 +277,7 @@ func parseUsageDaily(data []byte, agent string) (*UsageDaily, error) {
 
 	out := &UsageDaily{
 		Totals: Totals{
-			Tokens: raw.Totals.InputTokens + raw.Totals.OutputTokens,
+			Tokens: raw.Totals.tokens(),
 			Cost:   raw.Totals.TotalCost,
 		},
 	}
@@ -273,7 +287,7 @@ func parseUsageDaily(data []byte, agent string) (*UsageDaily, error) {
 				Date:   day.Date,
 				Agent:  agent,
 				Model:  mb.ModelName,
-				Tokens: mb.InputTokens + mb.OutputTokens,
+				Tokens: mb.tokens(),
 				Cost:   mb.Cost,
 			})
 		}
