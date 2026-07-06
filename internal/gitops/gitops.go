@@ -59,6 +59,14 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	return nil
 }
 
+// Regenerate re-derives and rewrites any content that depends on the
+// current merged repo state (e.g. re-running merge+render+inject after a
+// rebase pulled in new remote data), then returns so Publish can re-stage
+// the (possibly-changed) files before the retried push. A nil Regenerate is
+// valid: Publish then behaves exactly as if no rebase-driven regeneration
+// step existed at all.
+type Regenerate func() error
+
 // Publish stages files, commits them with commitMessage, and pushes to the
 // current branch's configured upstream. If the push is rejected because the
 // remote has commits the local repo hasn't fetched yet — an expected
@@ -66,12 +74,22 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 // (KTD8) — Publish fetches, rebases onto the now-current upstream, and
 // retries the push, up to maxPushAttempts pushes total.
 //
+// A successful rebase can pull in another machine's newly-pushed data,
+// which may make the commit's already-staged content (e.g. a rendered
+// README) stale relative to that new data. If regenerate is non-nil,
+// Publish calls it once after each successful rebase — before retrying the
+// push — then re-stages files and folds the result into the existing
+// commit via `commit --amend`, so the retried push carries fresh content
+// instead of stacking a second commit. regenerate may be nil, in which case
+// Publish performs no such step (matching its behavior before this
+// parameter existed).
+//
 // If every attempt is exhausted, or the push fails for a reason that isn't a
 // non-fast-forward rejection (e.g. no remote configured, auth failure),
 // Publish returns a descriptive error. In all such cases the local commit
 // created here is left intact — Publish never resets or rolls it back — so
 // no work is lost even when the push itself never lands.
-func Publish(ctx context.Context, repoDir string, files []string, commitMessage string) error {
+func Publish(ctx context.Context, repoDir string, files []string, commitMessage string, regenerate Regenerate) error {
 	if len(files) == 0 {
 		return errors.New("gitops: Publish requires at least one file to stage")
 	}
@@ -120,6 +138,18 @@ func Publish(ctx context.Context, repoDir string, files []string, commitMessage 
 				"rebasing before retrying push: %w (rebase aborted; local commit preserved on the branch, resolve the conflict manually and retry)",
 				err,
 			)
+		}
+
+		if regenerate != nil {
+			if err := regenerate(); err != nil {
+				return fmt.Errorf("regenerating content after rebase: %w (local commit preserved, unpushed)", err)
+			}
+			if err := runGit(ctx, repoDir, append([]string{"add"}, files...)...); err != nil {
+				return fmt.Errorf("re-staging regenerated files: %w (local commit preserved, unpushed)", err)
+			}
+			if err := runGit(ctx, repoDir, "commit", "--amend", "--no-edit"); err != nil {
+				return fmt.Errorf("amending commit with regenerated content: %w (local commit preserved, unpushed)", err)
+			}
 		}
 	}
 

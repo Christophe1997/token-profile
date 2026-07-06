@@ -65,16 +65,32 @@ type InitDeps struct {
 // Init performs one-command setup (R10, R11, F3): it scaffolds the
 // target repo's README markers and a scheduling entry — both idempotent, so
 // re-running Init against an already-initialized repo is safe — then
-// delegates to Run for the first commit.
+// delegates to run for the first commit.
 //
 // Config.TargetRepo == "" fails fast before touching anything, mirroring
 // NewRunCmd's own guard; the check lives here (rather than only in
 // NewInitCmd, as NewRunCmd's does for Run) so this error path is directly
 // unit-testable without going through cobra.
+//
+// Like Run, Init validates deps.RepoDir is a git working tree and holds the
+// run-lock for its whole duration (Fix 2, Fix 3): one acquisition covers
+// both the scaffolding steps below and the first run, rather than calling
+// the exported Run (which would try to acquire the same lock a second time
+// and immediately self-conflict) — it calls the unlocked run core instead.
 func Init(ctx context.Context, deps InitDeps) error {
 	if deps.Config.TargetRepo == "" {
 		return errTargetRepoMissing
 	}
+
+	if err := requireGitWorkTree(ctx, deps.RepoDir); err != nil {
+		return err
+	}
+
+	release, err := acquireRunLock(deps.RepoDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	if err := ensureReadmeMarkers(deps.RepoDir); err != nil {
 		return fmt.Errorf("scaffolding README markers: %w", err)
@@ -84,7 +100,7 @@ func Init(ctx context.Context, deps InitDeps) error {
 		return fmt.Errorf("scaffolding scheduling entry: %w", err)
 	}
 
-	return Run(ctx, RunDeps{
+	return run(ctx, RunDeps{
 		Config:    deps.Config,
 		Client:    deps.Client,
 		MachineID: deps.MachineID,

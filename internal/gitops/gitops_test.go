@@ -124,7 +124,7 @@ func TestPublish_NoContention_CommitsAndPushes(t *testing.T) {
 	solo := cloneWorkdir(t, remote, "solo")
 	writeFile(t, solo, "solo.txt", "hello from solo\n")
 
-	if err := Publish(t.Context(), solo, []string{"solo.txt"}, "add solo file"); err != nil {
+	if err := Publish(t.Context(), solo, []string{"solo.txt"}, "add solo file", nil); err != nil {
 		t.Fatalf("Publish() error = %v, want nil", err)
 	}
 
@@ -147,7 +147,7 @@ func TestPublish_ConcurrentPush_RetriesAndSucceeds(t *testing.T) {
 
 	// Machine A commits and pushes first: no contention, succeeds immediately.
 	writeFile(t, machineA, "a-file.txt", "a change\n")
-	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change"); err != nil {
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
 		t.Fatalf("Publish() on machineA error = %v, want nil", err)
 	}
 
@@ -155,7 +155,7 @@ func TestPublish_ConcurrentPush_RetriesAndSucceeds(t *testing.T) {
 	// should be rejected (non-fast-forward); Publish's retry loop must
 	// fetch, rebase onto A's commit, and succeed on the retried push.
 	writeFile(t, machineB, "b-file.txt", "b change\n")
-	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change"); err != nil {
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil); err != nil {
 		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
 	}
 
@@ -189,6 +189,94 @@ func installAlwaysRejectingHook(t *testing.T, remoteDir string) {
 	}
 }
 
+// TestPublish_RegenerateCalledAfterRebase_ReflectsInFinalPush covers Fix 1's
+// core mechanism: when a rejected push forces a fetch+rebase, Publish must
+// call regenerate exactly once after that rebase succeeds, re-stage the
+// files it touches, and fold the result into the same (amended) commit, so
+// the eventual successful push carries the regenerated content rather than
+// whatever was committed before the rebase pulled in new remote data.
+func TestPublish_RegenerateCalledAfterRebase_ReflectsInFinalPush(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote)
+
+	machineA := cloneWorkdir(t, remote, "machineA")
+	machineB := cloneWorkdir(t, remote, "machineB")
+
+	writeFile(t, machineA, "a-file.txt", "a change\n")
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
+		t.Fatalf("Publish() on machineA error = %v, want nil", err)
+	}
+
+	// Machine B's clone is now behind, so its first push attempt is
+	// rejected and Publish must fetch+rebase before retrying. regenerate
+	// simulates re-deriving b-file.txt's content from the freshly-rebased
+	// state (e.g. a re-render that now accounts for machine A's data).
+	writeFile(t, machineB, "b-file.txt", "b change (stale)\n")
+	regenerateCalls := 0
+	regenerate := func() error {
+		regenerateCalls++
+		return os.WriteFile(filepath.Join(machineB, "b-file.txt"), []byte("b change (regenerated)\n"), 0o644)
+	}
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", regenerate); err != nil {
+		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
+	}
+	if regenerateCalls != 1 {
+		t.Errorf("regenerate called %d times, want exactly 1 (once after the rebase pulled in machine A's push)", regenerateCalls)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify")
+	got, err := os.ReadFile(filepath.Join(verify, "b-file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(b-file.txt) error = %v", err)
+	}
+	if string(got) != "b change (regenerated)\n" {
+		t.Errorf("pushed b-file.txt = %q, want the regenerated content (proving regenerate's output was re-staged and pushed, not the stale pre-rebase commit)", got)
+	}
+
+	// A rebase-then-amend keeps a single commit for machine B's change
+	// rather than stacking a second one on top.
+	count := strings.TrimSpace(runGitT(t, verify, "rev-list", "--count", "HEAD"))
+	if count != "3" {
+		t.Errorf("git rev-list --count HEAD = %s, want 3 (seed + machineA's commit + machineB's single amended commit)", count)
+	}
+}
+
+// TestPublish_NilRegenerate_BehavesAsBefore covers the nil-tolerant default:
+// passing a nil Regenerate must behave exactly as Publish did before Fix 1
+// introduced the parameter — no regeneration step, just the ordinary
+// fetch-rebase-retry loop.
+func TestPublish_NilRegenerate_BehavesAsBefore(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote)
+
+	machineA := cloneWorkdir(t, remote, "machineA")
+	machineB := cloneWorkdir(t, remote, "machineB")
+
+	writeFile(t, machineA, "a-file.txt", "a change\n")
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
+		t.Fatalf("Publish() on machineA error = %v, want nil", err)
+	}
+
+	writeFile(t, machineB, "b-file.txt", "b change\n")
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil); err != nil {
+		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify")
+	for name, want := range map[string]string{
+		"a-file.txt": "a change\n",
+		"b-file.txt": "b change\n",
+	} {
+		got, err := os.ReadFile(filepath.Join(verify, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v, want the remote to have both machines' changes", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("remote %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestPublish_RetriesExhausted_PreservesLocalCommit(t *testing.T) {
 	remote := initBareRemote(t)
 	seedRemote(t, remote)
@@ -197,7 +285,7 @@ func TestPublish_RetriesExhausted_PreservesLocalCommit(t *testing.T) {
 	installAlwaysRejectingHook(t, remote)
 	writeFile(t, work, "work-file.txt", "work change\n")
 
-	err := Publish(t.Context(), work, []string{"work-file.txt"}, "work change")
+	err := Publish(t.Context(), work, []string{"work-file.txt"}, "work change", nil)
 	if err == nil {
 		t.Fatal("Publish() error = nil, want an error after exhausting retries")
 	}

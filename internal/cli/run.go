@@ -4,11 +4,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -56,9 +59,32 @@ type RunDeps struct {
 // compute the summary, render the dashboard card, inject it into the
 // target repo's README, and publish both files to the repo's remote.
 //
+// Before touching anything, Run validates deps.RepoDir is a real git
+// working tree and acquires this machine's exclusive run-lock (Fix 2, Fix
+// 3) — both fail fast with an actionable error rather than leaving stray
+// files behind or racing a second overlapping invocation.
+//
 // Each stage's error is wrapped with enough context to identify which
 // stage failed, since a run can fail at many different points.
 func Run(ctx context.Context, deps RunDeps) error {
+	if err := requireGitWorkTree(ctx, deps.RepoDir); err != nil {
+		return err
+	}
+
+	release, err := acquireRunLock(deps.RepoDir)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	return run(ctx, deps)
+}
+
+// run is Run's validated, locked core. It's factored out so Init can
+// perform its own single lock acquisition — covering both its scaffolding
+// steps and this first run — without Run's own acquireRunLock call
+// contending against itself when Init delegates here (see Init).
+func run(ctx context.Context, deps RunDeps) error {
 	since := sinceDate(deps.Now, deps.Config.TrailingWindow)
 	dataset, err := deps.Client.Resolve(ctx, agentsview.ResolveOptions{Since: since})
 	if err != nil {
@@ -70,6 +96,57 @@ func Run(ctx context.Context, deps RunDeps) error {
 		return fmt.Errorf("writing snapshot: %w", err)
 	}
 
+	if err := mergeRenderInject(deps); err != nil {
+		return err
+	}
+
+	files := []string{snapshotRelPath(deps.MachineID), readmeFile}
+	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
+
+	// regenerate lets gitops.Publish re-derive the README after a rebase
+	// pulls in another machine's newly-pushed snapshot: without it, a
+	// retried push would carry this machine's pre-rebase render, which
+	// under-reports the now-merged totals (see gitops.Regenerate).
+	regenerate := func() error {
+		return mergeRenderInject(deps)
+	}
+	if err := gitops.Publish(ctx, deps.RepoDir, files, commitMessage, regenerate); err != nil {
+		return fmt.Errorf("publishing: %w", err)
+	}
+
+	return nil
+}
+
+// requireGitWorkTree verifies repoDir is a real, existing git working tree
+// before Run or Init touch anything inside it — including the run-lock's
+// own .token-profile directory (Fix 2) or a scaffolded README (Fix 3). A
+// misconfigured targetRepo (a typo, a nonexistent path, or a plain
+// directory that was never git-initialized) then fails fast with an
+// actionable error, rather than leaving stray files behind before
+// eventually failing deep inside gitops.Publish's own git invocations.
+func requireGitWorkTree(ctx context.Context, repoDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = repoDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("target repo %q is not a git repository — check the targetRepo setting in your config: %w", repoDir, err)
+	}
+	if strings.TrimSpace(stdout.String()) != "true" {
+		return fmt.Errorf("target repo %q is not a git repository — check the targetRepo setting in your config", repoDir)
+	}
+	return nil
+}
+
+// mergeRenderInject re-derives the merged dataset from every machine's
+// snapshot currently on disk under deps.RepoDir, computes the summary,
+// renders the dashboard card, and injects it into the target repo's
+// README, writing the updated file back. Both Run's initial pass and
+// gitops.Publish's post-rebase regenerate callback call this same helper,
+// so a rebase that pulls in another machine's data always gets reflected
+// in the README that's actually pushed.
+func mergeRenderInject(deps RunDeps) error {
 	merged, err := snapshot.Merge(deps.RepoDir)
 	if err != nil {
 		return fmt.Errorf("merging snapshots: %w", err)
@@ -95,12 +172,6 @@ func Run(ctx context.Context, deps RunDeps) error {
 
 	if err := os.WriteFile(readmePath, updated, 0o644); err != nil {
 		return fmt.Errorf("writing README %s: %w", readmePath, err)
-	}
-
-	files := []string{snapshotRelPath(deps.MachineID), readmeFile}
-	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
-	if err := gitops.Publish(ctx, deps.RepoDir, files, commitMessage); err != nil {
-		return fmt.Errorf("publishing: %w", err)
 	}
 
 	return nil

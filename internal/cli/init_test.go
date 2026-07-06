@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,71 @@ func TestInit_Rerun_NoOp(t *testing.T) {
 	}
 	if n := strings.Count(string(scheduleBytes), deps.BinaryPath); n != 1 {
 		t.Errorf("scheduling entry contains %d references to the binary after two init runs, want exactly 1 (no duplication)", n)
+	}
+}
+
+// TestInit_TargetRepoNotGitRepo_FailsFast covers Fix 3: a RepoDir that
+// exists but isn't a git working tree must fail fast with an actionable
+// error, before Init scaffolds anything (README markers, scheduling entry,
+// or a .token-profile directory) into it.
+func TestInit_TargetRepoNotGitRepo_FailsFast(t *testing.T) {
+	dir := t.TempDir()
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: dir},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-init",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      dir,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+	}
+
+	err := Init(t.Context(), deps)
+	if err == nil {
+		t.Fatal("Init() error = nil, want an error when RepoDir isn't a git repository")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("Init() error = %q, want it to explain RepoDir isn't a git repository", err.Error())
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".token-profile")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(.token-profile) error = %v, want os.ErrNotExist (no writes before the git-repo check runs)", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, readmeFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(README.md) error = %v, want os.ErrNotExist (no README scaffolding before the git-repo check runs)", statErr)
+	}
+}
+
+// TestInit_TargetRepoDoesNotExist_FailsFast covers Fix 3's other edge case
+// for Init: a RepoDir that doesn't exist at all must fail the same way.
+func TestInit_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: dir},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-init",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      dir,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+	}
+
+	err := Init(t.Context(), deps)
+	if err == nil {
+		t.Fatal("Init() error = nil, want an error when RepoDir doesn't exist")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("Init() error = %q, want it to explain RepoDir isn't a git repository", err.Error())
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(RepoDir) error = %v, want os.ErrNotExist (RepoDir itself must not be created as a side effect)", statErr)
 	}
 }
 

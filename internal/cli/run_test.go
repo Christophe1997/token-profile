@@ -249,6 +249,178 @@ func TestRun_MultiMachineMerge(t *testing.T) {
 	}
 }
 
+// installRacingPeerHook installs a post-commit hook in workDir's
+// .git/hooks that pushes peerWorkDir's already-committed-but-not-yet-pushed
+// commit immediately after workDir's own local commit lands. This is
+// deliberately a post-commit hook rather than a pre-push hook: a pre-push
+// hook fires *after* git has already snapshotted the remote's old ref
+// value for its own negotiation, so injecting a competing push from inside
+// one produces a protocol-level "incorrect old value provided" rejection
+// (classified as non-retryable by isNonFastForwardRejection, same as a
+// server-side policy rejection) rather than the ordinary client-side
+// "(fetch first)" rejection a real independent race produces. A
+// post-commit hook fires as part of the earlier `git commit` invocation —
+// strictly before workDir's push subprocess is ever spawned — so
+// peerWorkDir's push fully lands first, and workDir's own later push
+// negotiates against the truly current remote state, reproducing the
+// exact rejection a genuine multi-machine race produces (verified
+// empirically against real git 2.55: a pre-push-hook-based version of this
+// same setup reliably produced the wrong, non-retryable rejection).
+func installRacingPeerHook(t *testing.T, workDir, peerWorkDir string) {
+	t.Helper()
+	hookDir := filepath.Join(workDir, ".git", "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", hookDir, err)
+	}
+	// Idempotent by construction: once peerWorkDir's commit has landed, a
+	// repeat invocation (e.g. triggered again by the retry's rebase, which
+	// also creates a commit) is a push with nothing new, which git no-ops
+	// rather than erroring on.
+	script := fmt.Sprintf("#!/bin/sh\ngit -C %q push -q >/dev/null 2>&1 || true\n", peerWorkDir)
+	hookPath := filepath.Join(hookDir, "post-commit")
+	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(post-commit hook) error = %v", err)
+	}
+}
+
+// TestRun_MultiMachineMerge_RaceDuringRetry covers the P1 regression: a
+// genuine race where another machine's snapshot lands on the remote in the
+// exact window between this machine's local commit and its push attempt,
+// forcing gitops.Publish's fetch-rebase-retry path. Unlike
+// TestRun_MultiMachineMerge (non-racing: machine B clones only after A has
+// already pushed, so B's own initial merge already sees A's snapshot), this
+// test forces machine A's push to land strictly inside machine B's
+// commit-to-push window via a local pre-push hook. The FINAL pushed README
+// must reflect BOTH machines' data — proving Run() regenerates the merged
+// view after the retry's rebase, rather than publishing the stale
+// pre-rebase render (the exact bug Fix 1 addresses).
+//
+// Machine A's commit here only adds its own snapshot file — it
+// deliberately does not also touch README.md, mirroring the bug report's
+// own framing ("another machine pushed a new snapshot file in the
+// meantime"). A concurrent README edit from both machines' starting from
+// the same base is its own, orthogonal merge-conflict concern (verified
+// separately: two independent full-card renders from the same base do
+// generate a real git conflict, not a silent bad merge); what this test
+// isolates is the narrower, definitely-reachable case where the rebase
+// itself succeeds cleanly and *still* leaves a stale README unless
+// something recomputes it.
+func TestRun_MultiMachineMerge_RaceDuringRetry(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	workA := cloneWorkdir(t, remote, "machineA")
+	if err := snapshot.Write(workA, "machine-a", []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
+	}); err != nil {
+		t.Fatalf("snapshot.Write(machine-a) error = %v", err)
+	}
+	runGitT(t, workA, "add", filepath.Join(".token-profile", "snapshots", "machine-a.json"))
+	runGitT(t, workA, "commit", "-q", "-m", "machine-a snapshot")
+
+	workB := cloneWorkdir(t, remote, "machineB")
+	installRacingPeerHook(t, workB, workA)
+
+	binB := fakeAgentsviewBinary(t, "codex", "gpt-5.4", "2026-06-21", 500, 0.75)
+	depsB := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: binB},
+		MachineID: "machine-b",
+		Now:       asOf,
+		RepoDir:   workB,
+	}
+	if err := Run(t.Context(), depsB); err != nil {
+		t.Fatalf("Run() on machine B error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify")
+	if _, err := snapshot.Read(verify, "machine-a"); err != nil {
+		t.Errorf("snapshot.Read(machine-a) error = %v, want machine A's snapshot present", err)
+	}
+	if _, err := snapshot.Read(verify, "machine-b"); err != nil {
+		t.Errorf("snapshot.Read(machine-b) error = %v, want machine B's snapshot committed", err)
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+
+	// 1000 (machine A, learned about only via the retry's rebase) + 500
+	// (machine B) = 1,500 combined tokens. Before Fix 1, the pushed README
+	// still reflects only B's pre-rebase render (500 tokens only), since
+	// the retry never recomputes it after the rebase pulls in A's data.
+	if !strings.Contains(got, "1,500") {
+		t.Errorf("README missing combined total \"1,500\" tokens after the race (want the retry path to regenerate before the retried push):\n%s", got)
+	}
+	if !strings.Contains(got, "claude-sonnet-5") || !strings.Contains(got, "gpt-5.4") {
+		t.Errorf("README missing one of both machines' models in the breakdown after the race:\n%s", got)
+	}
+}
+
+// TestRun_TargetRepoNotGitRepo_FailsFast covers Fix 3: a RepoDir that
+// exists but isn't a git working tree (e.g. a typo'd targetRepo pointing at
+// a plain directory) must fail fast with an actionable error, and — the
+// concrete proof the check runs *before* any write, not after — must leave
+// no .token-profile directory behind at all.
+func TestRun_TargetRepoNotGitRepo_FailsFast(t *testing.T) {
+	dir := t.TempDir()
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-solo",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   dir,
+	}
+
+	err := Run(t.Context(), deps)
+	if err == nil {
+		t.Fatal("Run() error = nil, want an error when RepoDir isn't a git repository")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("Run() error = %q, want it to explain RepoDir isn't a git repository", err.Error())
+	}
+	if !strings.Contains(err.Error(), "targetRepo") {
+		t.Errorf("Run() error = %q, want actionable guidance mentioning %q", err.Error(), "targetRepo")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".token-profile")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(.token-profile) error = %v, want os.ErrNotExist (no writes before the git-repo check runs)", statErr)
+	}
+}
+
+// TestRun_TargetRepoDoesNotExist_FailsFast covers Fix 3's other edge case:
+// a RepoDir that doesn't exist on disk at all must produce the same clear,
+// actionable failure rather than a confusing "no such file" error from deep
+// inside snapshot.Write or gitops.Publish.
+func TestRun_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-solo",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   dir,
+	}
+
+	err := Run(t.Context(), deps)
+	if err == nil {
+		t.Fatal("Run() error = nil, want an error when RepoDir doesn't exist")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("Run() error = %q, want it to explain RepoDir isn't a git repository", err.Error())
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(RepoDir) error = %v, want os.ErrNotExist (RepoDir itself must not be created as a side effect)", statErr)
+	}
+}
+
 // TestRun_ReadmeMissingMarkers_SurfacesErrMarkersMissing covers the error
 // path: a target repo whose README lacks the token-profile markers must
 // fail with an actionable error surfacing readme.ErrMarkersMissing, rather
