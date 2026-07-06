@@ -31,6 +31,7 @@ committing. Use modern Go 1.26 idioms throughout: `any`, `slices`/`maps`/`cmp`,
 `min`/`max`, `new(val)`, `t.Context()` in tests. Load the
 `modern-go-guidelines:use-modern-go` skill before non-trivial Go changes for
 the current guideline set.
+- **Self-explanatory code first; comments are a last resort.** Carry intent in names, types, and structure. A comment may state only a design constraint, an invariant, or a non-obvious *why* (tradeoff / gotcha) a competent reader cannot infer. Never narrate what the code does, restate the next line, restate the diff, or document your own reasoning history. Rationale *about the change* belongs in the commit message, not the file. Match the surrounding comment density.
 
 ## PR / commit guidelines
 - Use Conventional Commits (see `agd:conventional-commits` skill): `<type>[optional scope]: <description>`.
