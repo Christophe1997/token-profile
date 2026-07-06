@@ -18,6 +18,14 @@ type Row struct {
 // Dataset is the unified per-(date, agent, model) usage dataset produced by
 // Client.Resolve. Per-model, per-tool, and combined views are all derivable
 // from it by summing Rows along different axes (KTD3).
+//
+// ByModel/ByTool/Total have no production caller: render.go reimplements
+// equivalent grouping over snapshot.Row (a distinct type from a different
+// package, since rendering operates on merged multi-machine data, not a
+// single machine's freshly-resolved Dataset). These methods and their tests
+// stay here because U2's plan-mandated verification is that Dataset itself
+// correctly supports the grouping matrix (KTD3) independent of how a
+// downstream package happens to consume it.
 type Dataset struct {
 	Rows []Row
 }
