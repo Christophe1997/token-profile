@@ -59,11 +59,13 @@ func statDurationDays(first, last string) int {
 	return int(l.Sub(f).Hours()/24) + 1
 }
 
-// Render composes ds, sum, and mode into the dashboard card. renderedAt is
-// the moment this render happened, shown verbatim (absolute, UTC) as the
-// "last updated" line (R9, AE3); it is an explicit input rather than
-// time.Now() so callers stay deterministic and testable.
-func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, renderedAt time.Time) string {
+// Render composes ds, sum, and mode into the dashboard card. breakdownLimit
+// caps how many entries the breakdown section shows individually (the rest
+// are folded into one summary line); zero or negative shows every entry.
+// renderedAt is the moment this render happened, shown verbatim (absolute,
+// UTC) as the "last updated" line (R9, AE3); it is an explicit input rather
+// than time.Now() so callers stay deterministic and testable.
+func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) string {
 	var lines []string
 	lines = append(lines, titleLine(ds))
 	lines = append(lines, "")
@@ -73,7 +75,7 @@ func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.Breakdow
 	lines = append(lines, "")
 	lines = append(lines, streakLine(sum))
 	lines = append(lines, "")
-	lines = append(lines, breakdownLines(ds, mode)...)
+	lines = append(lines, breakdownLines(ds, mode, breakdownLimit)...)
 	lines = append(lines, "")
 	lines = append(lines, lastUpdatedLine(renderedAt))
 	return box(lines)
@@ -188,14 +190,32 @@ type breakdownEntry struct {
 	Cost   float64
 }
 
-func breakdownLines(ds snapshot.MergedDataset, mode config.BreakdownMode) []string {
+// breakdownLines renders mode's grouped entries, showing at most limit of
+// them individually (sorted by descending tokens, so the top contributors
+// lead) and folding whatever's left into one "N more" summary line — never
+// dropping the excess silently. limit <= 0 shows every entry.
+func breakdownLines(ds snapshot.MergedDataset, mode config.BreakdownMode, limit int) []string {
 	lines := []string{breakdownHeading(mode)}
 	entries := groupBreakdown(ds.Rows, mode)
 	if len(entries) == 0 {
 		return append(lines, "  "+noDataMessage)
 	}
-	for _, e := range entries {
+
+	shown, omitted := entries, []breakdownEntry(nil)
+	if limit > 0 && len(entries) > limit {
+		shown, omitted = entries[:limit], entries[limit:]
+	}
+	for _, e := range shown {
 		lines = append(lines, fmt.Sprintf("  %s — %s tokens ($%.2f)", e.Label, formatTokens(e.Tokens), e.Cost))
+	}
+	if len(omitted) > 0 {
+		var tokens int64
+		var cost float64
+		for _, e := range omitted {
+			tokens += e.Tokens
+			cost += e.Cost
+		}
+		lines = append(lines, fmt.Sprintf("  … %d more — %s tokens ($%.2f)", len(omitted), formatTokens(tokens), cost))
 	}
 	return lines
 }

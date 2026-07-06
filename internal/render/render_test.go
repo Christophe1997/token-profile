@@ -36,7 +36,7 @@ func TestRender_HappyPath_AllFourBlocksInOrder(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	if !strings.HasPrefix(strings.TrimRight(out, "\n"), "┌") {
 		t.Errorf("Render() output does not start with a top border: %q", firstLine(out))
@@ -70,7 +70,7 @@ func TestRender_TitleIsFirstContentLine(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) < 2 {
@@ -114,7 +114,7 @@ func TestRender_TitleIncludesStatDuration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 			sum := summary.Compute(tt.ds, asOf, 30*24*time.Hour)
-			out := render.Render(tt.ds, sum, config.BreakdownPerModel, asOf)
+			out := render.Render(tt.ds, sum, config.BreakdownPerModel, -1, asOf)
 
 			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 			if len(lines) < 2 {
@@ -138,7 +138,7 @@ func TestRender_DefaultBreakdownIsPerModel(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	for _, model := range []string{"claude-sonnet-5", "gpt-5.4", "claude-opus-5"} {
 		if !strings.Contains(out, model) {
@@ -162,9 +162,9 @@ func TestRender_BreakdownModesDiffer(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
-	perModel := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
-	perTool := render.Render(ds, sum, config.BreakdownPerTool, renderedAt)
-	combined := render.Render(ds, sum, config.BreakdownCombined, renderedAt)
+	perModel := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
+	perTool := render.Render(ds, sum, config.BreakdownPerTool, -1, renderedAt)
+	combined := render.Render(ds, sum, config.BreakdownCombined, -1, renderedAt)
 
 	if perModel == perTool || perModel == combined || perTool == combined {
 		t.Fatalf("expected distinct output per breakdown mode, got at least one pair equal")
@@ -191,6 +191,86 @@ func TestRender_BreakdownModesDiffer(t *testing.T) {
 	}
 }
 
+// manyModelsDataset has 5 distinct models with distinct, easily orderable
+// token totals, for exercising breakdown-limit truncation (fixtureDataset's
+// 3 models can't exercise a cap below its own count).
+func manyModelsDataset() snapshot.MergedDataset {
+	return snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "model-a", Tokens: 500, Cost: 5.00},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "model-b", Tokens: 400, Cost: 4.00},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "model-c", Tokens: 300, Cost: 3.00},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "model-d", Tokens: 200, Cost: 2.00},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "model-e", Tokens: 100, Cost: 1.00},
+	}}
+}
+
+// TestRender_BreakdownLimit_TruncatesToTopN covers the default top-N
+// display: a positive limit shows only the highest-token entries up to
+// that count, summarizing the rest in one combined line rather than
+// dropping them silently.
+func TestRender_BreakdownLimit_TruncatesToTopN(t *testing.T) {
+	ds := manyModelsDataset()
+	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	out := render.Render(ds, sum, config.BreakdownPerModel, 3, asOf)
+
+	for _, model := range []string{"model-a", "model-b", "model-c"} {
+		if !strings.Contains(out, model) {
+			t.Errorf("Render() missing top model %q:\n%s", model, out)
+		}
+	}
+	for _, model := range []string{"model-d", "model-e"} {
+		if strings.Contains(out, model) {
+			t.Errorf("Render() unexpectedly shows omitted model %q individually:\n%s", model, out)
+		}
+	}
+	if !strings.Contains(out, "2 more") {
+		t.Errorf("Render() missing an omitted-entries summary line (\"2 more\"):\n%s", out)
+	}
+	// model-d (200 tokens, $2.00) + model-e (100 tokens, $1.00)
+	if !strings.Contains(out, "300") || !strings.Contains(out, "$3.00") {
+		t.Errorf("Render() omitted-entries summary missing combined totals (300 tokens, $3.00):\n%s", out)
+	}
+}
+
+// TestRender_BreakdownLimit_NonPositiveShowsEveryEntry covers the
+// "unlimited" sentinel: a zero or negative limit must show every entry
+// with no summary line, matching pre-limit behavior.
+func TestRender_BreakdownLimit_NonPositiveShowsEveryEntry(t *testing.T) {
+	ds := manyModelsDataset()
+	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	for _, limit := range []int{0, -1} {
+		out := render.Render(ds, sum, config.BreakdownPerModel, limit, asOf)
+		for _, model := range []string{"model-a", "model-b", "model-c", "model-d", "model-e"} {
+			if !strings.Contains(out, model) {
+				t.Errorf("Render(limit=%d) missing model %q, want every entry shown:\n%s", limit, model, out)
+			}
+		}
+		if strings.Contains(out, "more") {
+			t.Errorf("Render(limit=%d) unexpectedly shows an omitted-entries summary line:\n%s", limit, out)
+		}
+	}
+}
+
+// TestRender_BreakdownLimit_AtOrAboveEntryCount_NoSummaryLine covers the
+// boundary: a limit equal to (or greater than) the entry count must show
+// every entry without an omitted-entries summary line.
+func TestRender_BreakdownLimit_AtOrAboveEntryCount_NoSummaryLine(t *testing.T) {
+	ds := manyModelsDataset()
+	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	for _, limit := range []int{5, 10} {
+		out := render.Render(ds, sum, config.BreakdownPerModel, limit, asOf)
+		if strings.Contains(out, "more") {
+			t.Errorf("Render(limit=%d) unexpectedly shows an omitted-entries summary line:\n%s", limit, out)
+		}
+	}
+}
+
 // TestRender_StaleRenderedAtVisibleAsOldDate covers AE3: a "rendered at"
 // timestamp 10+ days in the past must render visibly as that specific old
 // date, not be obscured behind a vague/relative freshness indicator.
@@ -200,7 +280,7 @@ func TestRender_StaleRenderedAtVisibleAsOldDate(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	staleRenderedAt := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC) // 10 days before asOf
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, staleRenderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, staleRenderedAt)
 
 	const want = "2026-06-12 09:00 UTC"
 	if !strings.Contains(out, want) {
@@ -221,7 +301,7 @@ func TestRender_EmptyDataset_NoDataYetState(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	if !strings.Contains(out, "No data yet") {
 		t.Errorf("Render() output missing \"No data yet\" state for empty dataset:\n%s", out)
@@ -242,7 +322,7 @@ func TestRender_TrendGraphGroupsByDateSummingTokens(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	for _, label := range []string{"06-20", "06-21", "06-22"} {
 		if !strings.Contains(out, label) {
@@ -273,7 +353,7 @@ func TestRender_TrendYAxisUsesTokenUnits(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := asOf
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	trendIdx := strings.Index(out, "Trend:")
 	streakIdx := strings.Index(out, "Streak:")
@@ -306,7 +386,7 @@ func TestRender_SingleDayDataset_NoDuplicateAxisLabel(t *testing.T) {
 	// mistaken for a second trend-graph occurrence of "07-01".
 	renderedAt := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
 
-	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	out := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	if got := strings.Count(out, "07-01"); got != 1 {
 		t.Errorf("Render() trend graph shows date label \"07-01\" %d times, want exactly 1:\n%s", got, out)
@@ -322,7 +402,7 @@ func TestRender_GoldenFile(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 
-	got := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+	got := render.Render(ds, sum, config.BreakdownPerModel, -1, renderedAt)
 
 	want, err := os.ReadFile("testdata/dashboard_card.golden")
 	if err != nil {

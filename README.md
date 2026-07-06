@@ -118,6 +118,7 @@ default.
 | `targetRepo` | string | *(required)* | Local working-copy path of the repo hosting your rendered profile. `run`/`init` fail fast if this is unset. |
 | `breakdown` | `"per-model"` \| `"per-tool"` \| `"combined"` | `"per-model"` | How the rendered breakdown groups usage: by model, by coding agent/tool, or one combined total. |
 | `trailingWindow` | duration string (e.g. `"720h"`) | *(unset)* | How far back the rendered card reaches, and the length of the window compared against for the window-over-window rate. Also bounds how far back usage is queried on each run. Unset defers to a 30-day default, matching agentsview's own. |
+| `breakdownLimit` | integer | `3` | How many entries the breakdown section shows individually, highest-token first; the rest are folded into one "N more" summary line rather than dropped silently. `0` (unset) defers to the default of 3; a negative value shows every entry with no cap. |
 | `machineIdPath` | string | `~/.token-profile/machine-id` | Where this machine's cached random identity is stored. Identity is random, not derived from hostname, so two machines that happen to share a hostname never collide. |
 
 Example:
@@ -126,7 +127,8 @@ Example:
 {
   "targetRepo": "/Users/you/code/you",
   "breakdown": "per-tool",
-  "trailingWindow": "720h"
+  "trailingWindow": "720h",
+  "breakdownLimit": 5
 }
 ```
 

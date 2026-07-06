@@ -31,6 +31,7 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 		"targetRepo": "/home/adopter/username",
 		"breakdown": "per-tool",
 		"trailingWindow": "168h",
+		"breakdownLimit": 5,
 		"machineIdPath": "/home/adopter/.token-profile/machine-id"
 	}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -46,10 +47,30 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 		TargetRepo:     "/home/adopter/username",
 		Breakdown:      config.BreakdownPerTool,
 		TrailingWindow: 168 * time.Hour,
+		BreakdownLimit: 5,
 		MachineIDPath:  "/home/adopter/.token-profile/machine-id",
 	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
+	}
+}
+
+// TestLoad_NegativeBreakdownLimitMeansUnlimited covers the sentinel: a
+// negative breakdownLimit must load as-is (not rejected, not coerced to the
+// default), since callers treat negative as "show every entry."
+func TestLoad_NegativeBreakdownLimitMeansUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"breakdownLimit": -1}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.BreakdownLimit != -1 {
+		t.Errorf("BreakdownLimit = %d, want -1", cfg.BreakdownLimit)
 	}
 }
 

@@ -220,9 +220,10 @@ func mergeRenderInject(deps RunDeps) error {
 
 	window := cmp.Or(deps.Config.TrailingWindow, config.DefaultTrailingWindow)
 	current := snapshot.FilterSince(merged, deps.Now.Add(-window))
+	breakdownLimit := cmp.Or(deps.Config.BreakdownLimit, config.DefaultBreakdownLimit)
 
 	sum := summary.Compute(merged, deps.Now, window)
-	card := render.Render(current, sum, deps.Config.Breakdown, deps.Now)
+	card := render.Render(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
 
 	readmePath := filepath.Join(deps.RepoDir, readmeFile)
 	readmeBytes, err := os.ReadFile(readmePath)

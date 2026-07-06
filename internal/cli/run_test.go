@@ -126,6 +126,142 @@ func fakeAgentsviewBinary(t *testing.T, agent, model, date string, tokens int64,
 	return path
 }
 
+// fakeAgentsviewModel is one modelBreakdowns entry fakeMultiModelBinary
+// answers with, for a single fixed agent/date.
+type fakeAgentsviewModel struct {
+	Model  string
+	Tokens int64
+	Cost   float64
+}
+
+// fakeMultiModelBinary mirrors fakeAgentsviewBinary but answers with
+// several models' usage on one date, for exercising breakdown-limit
+// truncation at the CLI level (a single-model fixture can't).
+func fakeMultiModelBinary(t *testing.T, agent, date string, models []fakeAgentsviewModel) string {
+	t.Helper()
+	sessionJSON := fmt.Sprintf(`{"sessions": [{"agent": %q}], "next_cursor": ""}`, agent)
+
+	var breakdowns []string
+	var totalTokens int64
+	var totalCost float64
+	for _, m := range models {
+		breakdowns = append(breakdowns, fmt.Sprintf(
+			`{"modelName": %q, "inputTokens": %d, "outputTokens": 0, "cost": %v}`,
+			m.Model, m.Tokens, m.Cost,
+		))
+		totalTokens += m.Tokens
+		totalCost += m.Cost
+	}
+	usageJSON := fmt.Sprintf(
+		`{"daily": [{"date": %q, "modelBreakdowns": [%s]}], "totals": {"inputTokens": %d, "outputTokens": 0, "totalCost": %v}}`,
+		date, strings.Join(breakdowns, ","), totalTokens, totalCost,
+	)
+
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"session\" ]; then\n" +
+		"  cat <<'EOF'\n" + sessionJSON + "\nEOF\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"cat <<'EOF'\n" + usageJSON + "\nEOF\n"
+
+	path := filepath.Join(t.TempDir(), "agentsview")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+// TestRun_BreakdownLimit_DefaultShowsTopThree covers the default breakdown
+// cap end-to-end: with no breakdownLimit configured, a run with 5 models
+// must publish a card showing only the top 3 individually, plus a summary
+// line for the rest.
+func TestRun_BreakdownLimit_DefaultShowsTopThree(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "limit-default")
+
+	bin := fakeMultiModelBinary(t, "claude-code", "2026-06-20", []fakeAgentsviewModel{
+		{Model: "model-a", Tokens: 500, Cost: 5.0},
+		{Model: "model-b", Tokens: 400, Cost: 4.0},
+		{Model: "model-c", Tokens: 300, Cost: 3.0},
+		{Model: "model-d", Tokens: 200, Cost: 2.0},
+		{Model: "model-e", Tokens: 100, Cost: 1.0},
+	})
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-limit",
+		Now:       time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(work, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+	for _, model := range []string{"model-a", "model-b", "model-c"} {
+		if !strings.Contains(got, model) {
+			t.Errorf("README missing top model %q:\n%s", model, got)
+		}
+	}
+	for _, model := range []string{"model-d", "model-e"} {
+		if strings.Contains(got, model) {
+			t.Errorf("README unexpectedly shows omitted model %q individually:\n%s", model, got)
+		}
+	}
+	if !strings.Contains(got, "2 more") {
+		t.Errorf("README missing an omitted-entries summary line (\"2 more\"):\n%s", got)
+	}
+}
+
+// TestRun_BreakdownLimit_ConfiguredValueOverridesDefault covers explicit
+// configuration: a configured breakdownLimit must apply instead of the
+// default 3.
+func TestRun_BreakdownLimit_ConfiguredValueOverridesDefault(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "limit-configured")
+
+	bin := fakeMultiModelBinary(t, "claude-code", "2026-06-20", []fakeAgentsviewModel{
+		{Model: "model-a", Tokens: 500, Cost: 5.0},
+		{Model: "model-b", Tokens: 400, Cost: 4.0},
+		{Model: "model-c", Tokens: 300, Cost: 3.0},
+		{Model: "model-d", Tokens: 200, Cost: 2.0},
+		{Model: "model-e", Tokens: 100, Cost: 1.0},
+	})
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, BreakdownLimit: 1},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-limit",
+		Now:       time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(work, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+	if !strings.Contains(got, "model-a") {
+		t.Errorf("README missing top model \"model-a\":\n%s", got)
+	}
+	for _, model := range []string{"model-b", "model-c", "model-d", "model-e"} {
+		if strings.Contains(got, model) {
+			t.Errorf("README unexpectedly shows omitted model %q individually:\n%s", model, got)
+		}
+	}
+	if !strings.Contains(got, "4 more") {
+		t.Errorf("README missing an omitted-entries summary line (\"4 more\"):\n%s", got)
+	}
+}
+
 // TestRun_EndToEnd_SoloAdopterRefresh covers F1: a solo adopter's run
 // resolves usage, writes a snapshot, renders the card into the README, and
 // publishes both to the remote.

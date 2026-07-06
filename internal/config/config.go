@@ -24,6 +24,11 @@ import (
 // default" option and must know a concrete number itself.
 const DefaultTrailingWindow = 30 * 24 * time.Hour
 
+// DefaultBreakdownLimit is the number of top entries the rendered
+// breakdown shows when BreakdownLimit is unset (zero) — see
+// Config.BreakdownLimit.
+const DefaultBreakdownLimit = 3
+
 // BreakdownMode selects how the rendered usage breakdown groups data.
 type BreakdownMode string
 
@@ -43,6 +48,11 @@ type Config struct {
 	// agentsview's --since flag entirely, deferring to its own default
 	// trailing window (30 days), per KTD10.
 	TrailingWindow time.Duration `json:"trailingWindow,omitzero"`
+	// BreakdownLimit caps how many entries the rendered breakdown shows,
+	// combining the rest into one summary line rather than dropping them
+	// silently. Zero (unset) defers to DefaultBreakdownLimit; a negative
+	// value shows every entry with no cap.
+	BreakdownLimit int `json:"breakdownLimit,omitzero"`
 	// MachineIDPath is where this machine's cached identity is stored.
 	MachineIDPath string `json:"machineIdPath,omitzero"`
 }
