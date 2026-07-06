@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,7 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 		TrailingWindow: 168 * time.Hour,
 		BreakdownLimit: 5,
 		MachineIDPath:  "/home/adopter/.token-profile/machine-id",
+		RenderMode:     config.RenderModeSVG,
 	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
@@ -74,6 +76,40 @@ func TestLoad_NegativeBreakdownLimitMeansUnlimited(t *testing.T) {
 	}
 }
 
+func TestLoad_MissingRenderModeDefaultsToSVG(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"targetRepo": "/home/adopter/username"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.RenderMode != config.RenderModeSVG {
+		t.Errorf("RenderMode = %q, want %q", cfg.RenderMode, config.RenderModeSVG)
+	}
+}
+
+func TestLoad_ExplicitAsciiRenderMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"renderMode": "ascii"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.RenderMode != config.RenderModeASCII {
+		t.Errorf("RenderMode = %q, want %q", cfg.RenderMode, config.RenderModeASCII)
+	}
+}
+
 func TestLoad_InvalidBreakdownIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -85,6 +121,25 @@ func TestLoad_InvalidBreakdownIsRejected(t *testing.T) {
 	_, err := config.Load(path)
 	if err == nil {
 		t.Fatal("Load() error = nil, want an error for invalid breakdown mode")
+	}
+}
+
+func TestLoad_InvalidRenderModeIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"renderMode": "ansi-art"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error for invalid render mode")
+	}
+	for _, want := range []string{string(config.RenderModeSVG), string(config.RenderModeASCII)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to name recognized render mode %q", err, want)
+		}
 	}
 }
 
@@ -104,6 +159,22 @@ func TestWriteTemplate_CreatesLoadableConfig(t *testing.T) {
 	}
 	if cfg.Breakdown != config.BreakdownPerModel {
 		t.Errorf("Breakdown = %q, want %q", cfg.Breakdown, config.BreakdownPerModel)
+	}
+}
+
+func TestWriteTemplate_ExplicitlyWritesRenderMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	if err := config.WriteTemplate(path, ""); err != nil {
+		t.Fatalf("WriteTemplate() error = %v, want nil", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), `"renderMode": "svg"`) {
+		t.Errorf("scaffolded config = %s, want it to explicitly include %q", data, `"renderMode": "svg"`)
 	}
 }
 

@@ -38,6 +38,14 @@ const (
 	BreakdownCombined BreakdownMode = "combined"
 )
 
+// RenderMode selects which dashboard card the rendered profile shows.
+type RenderMode string
+
+const (
+	RenderModeSVG   RenderMode = "svg"
+	RenderModeASCII RenderMode = "ascii"
+)
+
 // Config is token-profile's configuration schema.
 type Config struct {
 	// TargetRepo is the path to the repo hosting the rendered README profile.
@@ -55,6 +63,8 @@ type Config struct {
 	BreakdownLimit int `json:"breakdownLimit,omitzero"`
 	// MachineIDPath is where this machine's cached identity is stored.
 	MachineIDPath string `json:"machineIdPath,omitzero"`
+	// RenderMode selects which dashboard card gets rendered into the README.
+	RenderMode RenderMode `json:"renderMode,omitzero"`
 }
 
 // UnmarshalJSON decodes Config, accepting trailingWindow as a
@@ -86,6 +96,7 @@ func Default() Config {
 	return Config{
 		Breakdown:     BreakdownPerModel,
 		MachineIDPath: defaultMachineIDPath(),
+		RenderMode:    RenderModeSVG,
 	}
 }
 
@@ -114,27 +125,35 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate reports whether cfg holds a recognized breakdown mode.
+// Validate reports whether cfg holds a recognized breakdown mode and render
+// mode.
 func (c Config) Validate() error {
 	switch c.Breakdown {
 	case BreakdownPerModel, BreakdownPerTool, BreakdownCombined:
-		return nil
 	default:
 		return fmt.Errorf("invalid breakdown mode %q (want %q, %q, or %q)",
 			c.Breakdown, BreakdownPerModel, BreakdownPerTool, BreakdownCombined)
 	}
+	switch c.RenderMode {
+	case RenderModeSVG, RenderModeASCII:
+	default:
+		return fmt.Errorf("invalid render mode %q (want %q or %q)",
+			c.RenderMode, RenderModeSVG, RenderModeASCII)
+	}
+	return nil
 }
 
 // configTemplateData is the JSON shape WriteTemplate scaffolds. It carries
-// only targetRepo and breakdown — trailingWindow and machineIdPath are
-// deliberately omitted rather than spelled out blank: UnmarshalJSON
-// overwrites Breakdown/MachineIDPath onto Default()'s pre-populated values
-// whenever their JSON key is present, even at a zero value, so an explicit
-// blank key here would corrupt those defaults the next time this same file
-// is loaded.
+// only targetRepo, breakdown, and renderMode — trailingWindow and
+// machineIdPath are deliberately omitted rather than spelled out blank:
+// UnmarshalJSON overwrites Breakdown/MachineIDPath onto Default()'s
+// pre-populated values whenever their JSON key is present, even at a zero
+// value, so an explicit blank key here would corrupt those defaults the
+// next time this same file is loaded.
 type configTemplateData struct {
 	TargetRepo string        `json:"targetRepo"`
 	Breakdown  BreakdownMode `json:"breakdown"`
+	RenderMode RenderMode    `json:"renderMode"`
 }
 
 // WriteTemplate scaffolds a starter config file at path with targetRepo
@@ -152,6 +171,7 @@ func WriteTemplate(path, targetRepo string) error {
 	data, err := json.MarshalIndent(configTemplateData{
 		TargetRepo: targetRepo,
 		Breakdown:  BreakdownPerModel,
+		RenderMode: RenderModeSVG,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding config template: %w", err)
