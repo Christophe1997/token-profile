@@ -205,6 +205,38 @@ func defaultScheduleDest() string {
 	return defaultStateFile(name)
 }
 
+// loadOrScaffoldConfig loads the config file at configPath for `init`,
+// distinguishing "no config file exists yet" (first-time adopter) from "a
+// config file exists but targetRepo is simply blank" (mis-set config): only
+// the former scaffolds a starter template and returns a guided error; the
+// latter returns the loaded config as-is (with TargetRepo == ""), so the
+// caller's existing errTargetRepoMissing check applies unchanged. A stat
+// error other than os.ErrNotExist (e.g. permission denied) is treated as
+// "exists" — scaffolding must never clobber a file it couldn't even read.
+func loadOrScaffoldConfig(configPath string) (config.Config, error) {
+	configExists := true
+	if _, statErr := os.Stat(configPath); errors.Is(statErr, os.ErrNotExist) {
+		configExists = false
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	if cfg.TargetRepo == "" && !configExists {
+		if err := config.WriteTemplate(configPath); err != nil {
+			return config.Config{}, fmt.Errorf("scaffolding starter config: %w", err)
+		}
+		return config.Config{}, fmt.Errorf(
+			`created a starter config at %s — edit it to set "targetRepo", then re-run "token-profile init"`,
+			configPath,
+		)
+	}
+
+	return cfg, nil
+}
+
 // NewInitCmd builds the `token-profile init` cobra command: a thin wrapper
 // that loads the real config file and this machine's cached identity, then
 // delegates the actual scaffolding-plus-first-run flow to Init. Mirrors
@@ -217,9 +249,9 @@ func NewInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Scaffold README markers and a scheduling entry, then perform the first run",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
+			cfg, err := loadOrScaffoldConfig(configPath)
 			if err != nil {
-				return fmt.Errorf("loading config %s: %w", configPath, err)
+				return err
 			}
 			if cfg.TargetRepo == "" {
 				return errTargetRepoMissing

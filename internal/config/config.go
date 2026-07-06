@@ -4,6 +4,7 @@
 package config
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,6 +102,43 @@ func (c Config) Validate() error {
 		return fmt.Errorf("invalid breakdown mode %q (want %q, %q, or %q)",
 			c.Breakdown, BreakdownPerModel, BreakdownPerTool, BreakdownCombined)
 	}
+}
+
+// configTemplate is the starter config WriteTemplate scaffolds. targetRepo
+// is present but blank — the one field a first-time adopter must fill in —
+// and breakdown is spelled out at its real default so Validate() still
+// passes on the next Load. trailingWindow and machineIdPath are
+// deliberately omitted rather than spelled out blank: UnmarshalJSON
+// overwrites Breakdown/MachineIDPath onto Default()'s pre-populated values
+// whenever their JSON key is present, even at a zero value, so an explicit
+// blank key here would corrupt those defaults the next time this same file
+// is loaded.
+const configTemplate = `{
+  "targetRepo": "",
+  "breakdown": "per-model"
+}
+`
+
+// WriteTemplate scaffolds a starter config file at path, creating parent
+// directories as needed. It refuses to overwrite an existing file — same
+// atomic O_CREATE|O_EXCL convention as internal/cli/lock.go's
+// writeLockFile — so it's only safe to call once the caller has confirmed
+// no config exists yet at path.
+func WriteTemplate(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating config directory for %s: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("creating config %s: %w", path, err)
+	}
+	_, writeErr := f.WriteString(configTemplate)
+	closeErr := f.Close()
+	if err := cmp.Or(writeErr, closeErr); err != nil {
+		os.Remove(path)
+		return fmt.Errorf("writing config template %s: %w", path, err)
+	}
+	return nil
 }
 
 func defaultMachineIDPath() string {

@@ -256,6 +256,86 @@ func TestInit_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
 	}
 }
 
+// TestLoadOrScaffoldConfig_NoConfigFile_ScaffoldsAndReturnsGuidedError covers
+// a first-time adopter: no config file exists yet at configPath, so
+// loadOrScaffoldConfig must scaffold a starter template and return a guided
+// error pointing at it, rather than the generic errTargetRepoMissing.
+func TestLoadOrScaffoldConfig_NoConfigFile_ScaffoldsAndReturnsGuidedError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	_, err := loadOrScaffoldConfig(path)
+	if err == nil {
+		t.Fatal("loadOrScaffoldConfig() error = nil, want a guided scaffold error")
+	}
+	if !strings.Contains(err.Error(), "created a starter config") {
+		t.Errorf("loadOrScaffoldConfig() error = %q, want it to mention %q", err.Error(), "created a starter config")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("loadOrScaffoldConfig() error = %q, want it to mention the config path %q", err.Error(), path)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() on scaffolded config error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != "" {
+		t.Errorf("scaffolded TargetRepo = %q, want empty", cfg.TargetRepo)
+	}
+	if cfg.Breakdown != config.BreakdownPerModel {
+		t.Errorf("scaffolded Breakdown = %q, want %q", cfg.Breakdown, config.BreakdownPerModel)
+	}
+}
+
+// TestLoadOrScaffoldConfig_ExistingBlankTargetRepo_ReturnsConfigUnmodified
+// covers a deliberately-edited config that still has a blank targetRepo:
+// loadOrScaffoldConfig must not scaffold over it, leaving the caller's
+// existing errTargetRepoMissing check to fire unchanged.
+func TestLoadOrScaffoldConfig_ExistingBlankTargetRepo_ReturnsConfigUnmodified(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", `{"breakdown":"per-model"}`)
+	path := filepath.Join(dir, "config.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	cfg, err := loadOrScaffoldConfig(path)
+	if err != nil {
+		t.Fatalf("loadOrScaffoldConfig() error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != "" {
+		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("config file changed: before %q, after %q", before, after)
+	}
+}
+
+// TestLoadOrScaffoldConfig_RerunAfterScaffold_ReturnsBlankTargetRepoNotGuidedError
+// covers re-running init after a first scaffold: the second call must find
+// the now-existing file via stat and return the loaded config plainly,
+// rather than scaffolding (and erroring) again.
+func TestLoadOrScaffoldConfig_RerunAfterScaffold_ReturnsBlankTargetRepoNotGuidedError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	if _, err := loadOrScaffoldConfig(path); err == nil {
+		t.Fatal("loadOrScaffoldConfig() first call error = nil, want the guided scaffold error")
+	}
+
+	cfg, err := loadOrScaffoldConfig(path)
+	if err != nil {
+		t.Fatalf("loadOrScaffoldConfig() second call error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != "" {
+		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
+	}
+}
+
 // TestInit_TargetRepoEmpty_FailsFast covers the error path: an unconfigured
 // TargetRepo must fail fast with a clear, actionable message rather than
 // panicking or guessing a location.
