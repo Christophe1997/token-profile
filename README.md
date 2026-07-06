@@ -147,17 +147,19 @@ nothing yet to compare against.
 
 ## How multi-machine sync works
 
-Each machine writes its own usage history as a snapshot file under
-`<targetRepo>/.token-profile/snapshots/<machine-id>.json`, accumulating
-across runs: a new run's data is merged in by (date, agent, model), so
-history a day has already rolled out of the trailing window still stays on
-disk rather than being dropped. Every run reads every snapshot present in
-the repo — including ones from machines that haven't run in a while — and
-merges them into the totals, trend, and streak shown on the card, which is
-itself scoped to just the current window (see `trailingWindow` above). Git
-is the only sync layer: there's no server, queue, or shared database, and
-pushes retry through a bounded fetch-rebase loop if another one of your
-machines pushed first.
+Each machine writes its own usage history under
+`<targetRepo>/.token-profile/snapshots/<machine-id>/`, one file per calendar
+month (`<start-date>-<end-date>.json`) so an actively-used machine's history
+doesn't pile up into a single ever-growing file. Within a month's file, a
+new run's data is merged in by (date, agent, model), so history a day has
+already rolled out of the trailing window still stays on disk rather than
+being dropped. Every run reads every snapshot present in the repo —
+including ones from machines that haven't run in a while — and merges them
+into the totals, trend, and streak shown on the card, which is itself
+scoped to just the current window (see `trailingWindow` above). Git is the
+only sync layer: there's no server, queue, or shared database, and pushes
+retry through a bounded fetch-rebase loop if another one of your machines
+pushed first.
 
 ## Scope
 

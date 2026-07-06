@@ -2,6 +2,7 @@ package snapshot_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -41,7 +42,9 @@ func TestWrite_ThenRead_RoundTrips(t *testing.T) {
 }
 
 // TestWrite_PersistsUnderTargetRepoSnapshotsDir pins down the on-disk
-// location: <targetRepo>/.token-profile/snapshots/<machineID>.json.
+// location: <targetRepo>/.token-profile/snapshots/<machineID>/<chunk>.json,
+// sharded by calendar month so a machine's history spreads across many
+// small files instead of one ever-growing one.
 func TestWrite_PersistsUnderTargetRepoSnapshotsDir(t *testing.T) {
 	dir := t.TempDir()
 	rows := []snapshot.Row{{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1, Cost: 0.1}}
@@ -50,10 +53,61 @@ func TestWrite_PersistsUnderTargetRepoSnapshotsDir(t *testing.T) {
 		t.Fatalf("Write() error = %v, want nil", err)
 	}
 
-	want := filepath.Join(dir, ".token-profile", "snapshots", "machine-a.json")
+	want := filepath.Join(dir, ".token-profile", "snapshots", "machine-a", "2026-06-01-2026-06-30.json")
 	if _, err := os.Stat(want); err != nil {
-		t.Errorf("expected snapshot file at %s, stat error = %v", want, err)
+		t.Errorf("expected snapshot chunk file at %s, stat error = %v", want, err)
 	}
+}
+
+// TestWrite_ShardsByCalendarMonth covers the chunking scheme itself: rows
+// from two different calendar months, written in one call, must land in
+// two separate chunk files, each holding only its own month's rows — never
+// mixed into one file.
+func TestWrite_ShardsByCalendarMonth(t *testing.T) {
+	dir := t.TempDir()
+	rows := []snapshot.Row{
+		{Date: "2026-05-15", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 200, Cost: 2.0},
+	}
+	if err := snapshot.Write(dir, "machine-a", rows); err != nil {
+		t.Fatalf("Write() error = %v, want nil", err)
+	}
+
+	machineDir := filepath.Join(dir, ".token-profile", "snapshots", "machine-a")
+	mayFile := filepath.Join(machineDir, "2026-05-01-2026-05-31.json")
+	juneFile := filepath.Join(machineDir, "2026-06-01-2026-06-30.json")
+
+	mayRows, err := readRawSnapshotFile(t, mayFile)
+	if err != nil {
+		t.Fatalf("reading %s error = %v, want nil", mayFile, err)
+	}
+	if len(mayRows) != 1 || mayRows[0] != rows[0] {
+		t.Errorf("%s rows = %+v, want [%+v]", mayFile, mayRows, rows[0])
+	}
+
+	juneRows, err := readRawSnapshotFile(t, juneFile)
+	if err != nil {
+		t.Fatalf("reading %s error = %v, want nil", juneFile, err)
+	}
+	if len(juneRows) != 1 || juneRows[0] != rows[1] {
+		t.Errorf("%s rows = %+v, want [%+v]", juneFile, juneRows, rows[1])
+	}
+}
+
+// readRawSnapshotFile decodes a chunk file directly (bypassing the
+// snapshot package's public API) so tests can assert on exactly which
+// on-disk file holds which rows.
+func readRawSnapshotFile(t *testing.T, path string) ([]snapshot.Row, error) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rows []snapshot.Row
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // TestWrite_RejectsMaliciousMachineID covers defense in depth (KTD6): even
@@ -73,11 +127,11 @@ func TestWrite_RejectsMaliciousMachineID(t *testing.T) {
 		})
 	}
 
-	// "../../evil" resolves to <dir>/evil.json (two levels above the
-	// snapshots dir lands back at dir itself) — still inside the test's own
-	// tempdir, so safe to assert against, and it must NOT have been created.
-	if _, err := os.Stat(filepath.Join(dir, "evil.json")); !os.IsNotExist(err) {
-		t.Errorf("Write() must not write outside the snapshots directory; stat(%s) error = %v", filepath.Join(dir, "evil.json"), err)
+	// "../../evil" resolves to <dir>/evil (two levels above the snapshots
+	// dir lands back at dir itself) — still inside the test's own tempdir,
+	// so safe to assert against, and it must NOT have been created.
+	if _, err := os.Stat(filepath.Join(dir, "evil")); !os.IsNotExist(err) {
+		t.Errorf("Write() must not write outside the snapshots directory; stat(%s) error = %v", filepath.Join(dir, "evil"), err)
 	}
 }
 
@@ -91,8 +145,8 @@ func TestRead_RejectsMaliciousMachineID(t *testing.T) {
 }
 
 // TestWrite_NoStrayTempFilesLeftBehind covers the atomic-write fix: after a
-// successful Write, the snapshots directory must contain only the final
-// <machine-id>.json file — no leftover temp file from the write-then-rename
+// successful Write, a machine's snapshot directory must contain only the
+// final chunk file — no leftover temp file from the write-then-rename
 // sequence.
 func TestWrite_NoStrayTempFilesLeftBehind(t *testing.T) {
 	dir := t.TempDir()
@@ -102,7 +156,7 @@ func TestWrite_NoStrayTempFilesLeftBehind(t *testing.T) {
 		t.Fatalf("Write() error = %v, want nil", err)
 	}
 
-	entries, err := os.ReadDir(filepath.Join(dir, ".token-profile", "snapshots"))
+	entries, err := os.ReadDir(filepath.Join(dir, ".token-profile", "snapshots", "machine-a"))
 	if err != nil {
 		t.Fatalf("ReadDir() error = %v", err)
 	}
@@ -110,8 +164,8 @@ func TestWrite_NoStrayTempFilesLeftBehind(t *testing.T) {
 	for i, e := range entries {
 		names[i] = e.Name()
 	}
-	if len(names) != 1 || names[0] != "machine-a.json" {
-		t.Errorf("snapshots dir contents = %v, want only [machine-a.json]", names)
+	if len(names) != 1 || names[0] != "2026-06-01-2026-06-30.json" {
+		t.Errorf("machine-a snapshot dir contents = %v, want only [2026-06-01-2026-06-30.json]", names)
 	}
 }
 
@@ -337,11 +391,13 @@ func TestWrite_SameKeyOverride_LeavesOtherKeysUntouched(t *testing.T) {
 // file out of many) would not otherwise risk.
 func TestWrite_CorruptedExistingSnapshot_FailsRatherThanDiscardingHistory(t *testing.T) {
 	dir := t.TempDir()
-	snapshotsDir := filepath.Join(dir, ".token-profile", "snapshots")
-	if err := os.MkdirAll(snapshotsDir, 0o755); err != nil {
+	machineDir := filepath.Join(dir, ".token-profile", "snapshots", "machine-a")
+	if err := os.MkdirAll(machineDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(snapshotsDir, "machine-a.json"), []byte("{not valid json"), 0o644); err != nil {
+	// The write below is for 2026-06-20, so the corrupted chunk must be the
+	// same calendar-month file Write will try to read and merge into.
+	if err := os.WriteFile(filepath.Join(machineDir, "2026-06-01-2026-06-30.json"), []byte("{not valid json"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -393,7 +449,11 @@ func TestMerge_CorruptedFileSkippedWithWarning(t *testing.T) {
 		t.Fatalf("Write(good-machine) error = %v, want nil", err)
 	}
 
-	corruptPath := filepath.Join(dir, ".token-profile", "snapshots", "corrupt-machine.json")
+	corruptMachineDir := filepath.Join(dir, ".token-profile", "snapshots", "corrupt-machine")
+	if err := os.MkdirAll(corruptMachineDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(corrupt) error = %v, want nil", err)
+	}
+	corruptPath := filepath.Join(corruptMachineDir, "2026-06-01-2026-06-30.json")
 	if err := os.WriteFile(corruptPath, []byte("{not valid json"), 0o644); err != nil {
 		t.Fatalf("WriteFile(corrupt) error = %v, want nil", err)
 	}

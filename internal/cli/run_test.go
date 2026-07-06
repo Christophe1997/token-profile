@@ -550,7 +550,7 @@ func TestRun_MultiMachineMerge_RaceDuringRetry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("snapshot.Write(machine-a) error = %v", err)
 	}
-	runGitT(t, workA, "add", filepath.Join(".token-profile", "snapshots", "machine-a.json"))
+	runGitT(t, workA, "add", filepath.Join(".token-profile", "snapshots", "machine-a"))
 	runGitT(t, workA, "commit", "-q", "-m", "machine-a snapshot")
 
 	workB := cloneWorkdir(t, remote, "machineB")

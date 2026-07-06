@@ -41,7 +41,7 @@ type RunDeps struct {
 	Config config.Config
 	// Client resolves this machine's local usage via agentsview.
 	Client *agentsview.Client
-	// MachineID identifies this machine's snapshot file within RepoDir.
+	// MachineID identifies this machine's snapshot directory within RepoDir.
 	MachineID string
 	// Now stands in for "the current time" throughout the run: it bounds
 	// the trailing-window --since cutoff, the streak's "today", and the
@@ -247,13 +247,17 @@ func mergeRenderInject(deps RunDeps) error {
 	return nil
 }
 
-// snapshotRelPath returns machineID's snapshot file path relative to a
+// snapshotRelPath returns machineID's snapshot directory path relative to a
 // target repo's root, matching snapshot.Write's on-disk layout
-// (.token-profile/snapshots/<machine-id>.json). The snapshot package
-// doesn't export this path (it's an internal file-layout detail), so it's
-// reconstructed here for gitops.Publish, which needs repo-relative paths.
+// (.token-profile/snapshots/<machine-id>/<start-date>-<end-date>.json,
+// chunked by calendar month). `git add` on a directory recursively stages
+// every chunk file beneath it — including new ones — so this stays correct
+// without tracking which specific chunk(s) a run touched. The snapshot
+// package doesn't export this path (it's an internal file-layout detail),
+// so it's reconstructed here for gitops.Publish, which needs repo-relative
+// paths.
 func snapshotRelPath(machineID string) string {
-	return filepath.Join(".token-profile", "snapshots", machineID+".json")
+	return filepath.Join(".token-profile", "snapshots", machineID)
 }
 
 // toSnapshotRows converts agentsview.Row (the resolved usage dataset's row

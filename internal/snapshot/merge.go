@@ -26,15 +26,15 @@ type MergedDataset struct {
 	Rows []Row
 }
 
-// Merge reads every snapshot file under targetRepo's snapshots directory
-// and unions their rows, summing different machines' contributions to the
-// same (date, agent, model) bucket. Each machine's own file already holds
-// that machine's complete accumulated history, deduplicated by key (Write
-// merges rather than replaces — see mergeRowsByKey), so a machine
-// re-running never inflates its own totals here — only distinct machines'
-// rows are additive.
+// Merge reads every machine's snapshot chunk files under targetRepo's
+// snapshots directory and unions their rows, summing different machines'
+// contributions to the same (date, agent, model) bucket. Each machine's own
+// chunks already hold that machine's complete accumulated history,
+// deduplicated by key (Write merges rather than replaces — see
+// mergeRowsByKey), so a machine re-running never inflates its own totals
+// here — only distinct machines' rows are additive.
 //
-// A snapshot file that fails to parse (corrupted or a partial write) is
+// A chunk file that fails to parse (corrupted or a partial write) is
 // skipped with a logged warning rather than aborting the whole merge, so
 // one machine's bad file can't take down every other machine's data.
 //
@@ -43,7 +43,7 @@ type MergedDataset struct {
 func Merge(targetRepo string) (MergedDataset, error) {
 	dir := snapshotsDir(targetRepo)
 
-	entries, err := os.ReadDir(dir)
+	machines, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return MergedDataset{}, nil
@@ -52,25 +52,38 @@ func Merge(targetRepo string) (MergedDataset, error) {
 	}
 
 	totals := make(map[mergeKey]Row)
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+	for _, machine := range machines {
+		if !machine.IsDir() {
 			continue
 		}
 
-		path := filepath.Join(dir, entry.Name())
-		rows, err := readSnapshotFile(path)
+		machineDir := filepath.Join(dir, machine.Name())
+		chunks, err := os.ReadDir(machineDir)
 		if err != nil {
-			log.Printf("snapshot: skipping unreadable/corrupted snapshot %s: %v", path, err)
+			log.Printf("snapshot: skipping unreadable machine directory %s: %v", machineDir, err)
 			continue
 		}
 
-		for _, r := range rows {
-			k := mergeKey{Date: r.Date, Agent: r.Agent, Model: r.Model}
-			t := totals[k]
-			t.Date, t.Agent, t.Model = r.Date, r.Agent, r.Model
-			t.Tokens += r.Tokens
-			t.Cost += r.Cost
-			totals[k] = t
+		for _, chunk := range chunks {
+			if chunk.IsDir() || filepath.Ext(chunk.Name()) != ".json" {
+				continue
+			}
+
+			path := filepath.Join(machineDir, chunk.Name())
+			rows, err := readSnapshotFile(path)
+			if err != nil {
+				log.Printf("snapshot: skipping unreadable/corrupted snapshot %s: %v", path, err)
+				continue
+			}
+
+			for _, r := range rows {
+				k := mergeKey{Date: r.Date, Agent: r.Agent, Model: r.Model}
+				t := totals[k]
+				t.Date, t.Agent, t.Model = r.Date, r.Agent, r.Model
+				t.Tokens += r.Tokens
+				t.Cost += r.Cost
+				totals[k] = t
+			}
 		}
 	}
 
