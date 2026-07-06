@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +28,8 @@ func fixtureDataset() snapshot.MergedDataset {
 }
 
 // TestRender_HappyPath_AllFourBlocksInOrder covers the confirmed
-// dashboard-card layout (R8): summary, trend graph, streak, and breakdown
-// all appear, in that order, inside a single bordered box.
+// dashboard-card layout (R8): a title, summary, trend graph, streak, and
+// breakdown all appear, in that order, inside a single bordered box.
 func TestRender_HappyPath_AllFourBlocksInOrder(t *testing.T) {
 	ds := fixtureDataset()
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
@@ -44,18 +45,87 @@ func TestRender_HappyPath_AllFourBlocksInOrder(t *testing.T) {
 		t.Errorf("Render() output does not end with a bottom border: %q", lastLine(out))
 	}
 
+	titleIdx := strings.Index(out, "Token Profile")
 	summaryIdx := strings.Index(out, "Tokens:")
 	trendIdx := strings.Index(out, "Trend")
 	streakIdx := strings.Index(out, "Streak:")
 	breakdownIdx := strings.Index(out, "Breakdown")
 
-	if summaryIdx < 0 || trendIdx < 0 || streakIdx < 0 || breakdownIdx < 0 {
-		t.Fatalf("Render() output missing a block: summaryIdx=%d trendIdx=%d streakIdx=%d breakdownIdx=%d\noutput:\n%s",
-			summaryIdx, trendIdx, streakIdx, breakdownIdx, out)
+	if titleIdx < 0 || summaryIdx < 0 || trendIdx < 0 || streakIdx < 0 || breakdownIdx < 0 {
+		t.Fatalf("Render() output missing a block: titleIdx=%d summaryIdx=%d trendIdx=%d streakIdx=%d breakdownIdx=%d\noutput:\n%s",
+			titleIdx, summaryIdx, trendIdx, streakIdx, breakdownIdx, out)
 	}
-	if !(summaryIdx < trendIdx && trendIdx < streakIdx && streakIdx < breakdownIdx) {
-		t.Errorf("Render() blocks out of order: summary=%d trend=%d streak=%d breakdown=%d",
-			summaryIdx, trendIdx, streakIdx, breakdownIdx)
+	if !(titleIdx < summaryIdx && summaryIdx < trendIdx && trendIdx < streakIdx && streakIdx < breakdownIdx) {
+		t.Errorf("Render() blocks out of order: title=%d summary=%d trend=%d streak=%d breakdown=%d",
+			titleIdx, summaryIdx, trendIdx, streakIdx, breakdownIdx)
+	}
+}
+
+// TestRender_TitleIsFirstContentLine covers the card's title (R8): it is
+// the box's very first content line, immediately below the top border, so
+// the card identifies itself before any usage data.
+func TestRender_TitleIsFirstContentLine(t *testing.T) {
+	ds := fixtureDataset()
+	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf)
+	renderedAt := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
+
+	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("Render() output has too few lines: %q", out)
+	}
+	if !strings.Contains(lines[1], "Token Profile") {
+		t.Errorf("Render() first content line = %q, want it to contain \"Token Profile\"", lines[1])
+	}
+}
+
+// TestRender_TitleIncludesStatDuration covers the title's stat-duration
+// suffix: the inclusive calendar span between the dataset's earliest and
+// latest recorded day, e.g. three distinct days (06-20 through 06-22) reads
+// "last 3 days", and a single day is singular ("last 1 day"). An empty
+// dataset has no span to report, so the title omits the suffix entirely.
+func TestRender_TitleIncludesStatDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		ds   snapshot.MergedDataset
+		want string
+	}{
+		{
+			name: "multi-day span",
+			ds:   fixtureDataset(),
+			want: "Token Profile — last 3 days",
+		},
+		{
+			name: "single day is singular",
+			ds: snapshot.MergedDataset{Rows: []snapshot.Row{
+				{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+			}},
+			want: "Token Profile — last 1 day",
+		},
+		{
+			name: "empty dataset omits duration",
+			ds:   snapshot.MergedDataset{},
+			want: "Token Profile",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+			sum := summary.Compute(tt.ds, asOf)
+			out := render.Render(tt.ds, sum, config.BreakdownPerModel, asOf)
+
+			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+			if len(lines) < 2 {
+				t.Fatalf("Render() output has too few lines: %q", out)
+			}
+			got := strings.TrimSuffix(strings.TrimPrefix(lines[1], "│ "), " │")
+			got = strings.TrimRight(got, " ")
+			if got != tt.want {
+				t.Errorf("Render() title line = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -185,6 +255,38 @@ func TestRender_TrendGraphGroupsByDateSummingTokens(t *testing.T) {
 	// reached the plot, not a placeholder series.
 	if !strings.Contains(out, "800") {
 		t.Errorf("Render() trend graph missing summed daily endpoint \"800\":\n%s", out)
+	}
+}
+
+// TestRender_TrendYAxisUsesTokenUnits covers the trend graph's y-axis: once
+// cache tokens are folded into Tokens (see agentsview.DailyRow), daily
+// totals routinely land in the millions, so the y-axis must render through
+// the same formatTokens shortening as the headline and breakdown lines
+// rather than printing raw 7+-digit values.
+func TestRender_TrendYAxisUsesTokenUnits(t *testing.T) {
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 5_000_000, Cost: 10},
+		{Date: "2026-06-21", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 12_000_000, Cost: 20},
+		{Date: "2026-06-22", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 8_000_000, Cost: 15},
+	}}
+	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf)
+	renderedAt := asOf
+
+	out := render.Render(ds, sum, config.BreakdownPerModel, renderedAt)
+
+	trendIdx := strings.Index(out, "Trend:")
+	streakIdx := strings.Index(out, "Streak:")
+	if trendIdx < 0 || streakIdx < 0 || streakIdx < trendIdx {
+		t.Fatalf("Render() missing Trend/Streak blocks in expected order:\n%s", out)
+	}
+	trendBlock := out[trendIdx:streakIdx]
+
+	if !strings.Contains(trendBlock, "M") {
+		t.Errorf("Render() trend graph y-axis missing an \"M\" unit suffix:\n%s", trendBlock)
+	}
+	if raw := regexp.MustCompile(`\d{7,}`).FindString(trendBlock); raw != "" {
+		t.Errorf("Render() trend graph y-axis shows unshortened raw number %q:\n%s", raw, trendBlock)
 	}
 }
 

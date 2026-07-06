@@ -1,7 +1,7 @@
 // Package render composes a merged snapshot, its computed summary, and a
 // breakdown mode into the single bordered ASCII dashboard card (R8): a
-// headline summary, an asciigraph trend line, a streak indicator, and a
-// usage breakdown, in that order.
+// title, headline summary, an asciigraph trend line, a streak indicator,
+// and a usage breakdown, in that order.
 package render
 
 import (
@@ -26,12 +26,47 @@ import (
 // panics on an empty series rather than rendering something meaningful.
 const noDataMessage = "No data yet — run token-profile to record your first day."
 
+// cardTitle is the dashboard card's heading — its first content line —
+// identifying the card before any usage data.
+const cardTitle = "Token Profile"
+
+// titleLine renders the card's heading, appending the stat duration — the
+// inclusive calendar span between ds's earliest and latest recorded day
+// (e.g. "last 30 days") — so the card states what window its numbers cover.
+// An empty dataset has no span to report, so the suffix is omitted.
+func titleLine(ds snapshot.MergedDataset) string {
+	dates, _ := dailyTokenTotals(ds.Rows)
+	if len(dates) == 0 {
+		return cardTitle
+	}
+	days := statDurationDays(dates[0], dates[len(dates)-1])
+	unit := "days"
+	if days == 1 {
+		unit = "day"
+	}
+	return fmt.Sprintf("%s — last %d %s", cardTitle, days, unit)
+}
+
+// statDurationDays returns the inclusive number of calendar days spanned by
+// [first, last] (both canonical "YYYY-MM-DD" dates, per snapshot.Row.Date) —
+// e.g. a single day spans 1, back-to-back days span 2.
+func statDurationDays(first, last string) int {
+	f, err1 := time.Parse(time.DateOnly, first)
+	l, err2 := time.Parse(time.DateOnly, last)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	return int(l.Sub(f).Hours()/24) + 1
+}
+
 // Render composes ds, sum, and mode into the dashboard card. renderedAt is
 // the moment this render happened, shown verbatim (absolute, UTC) as the
 // "last updated" line (R9, AE3); it is an explicit input rather than
 // time.Now() so callers stay deterministic and testable.
 func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, renderedAt time.Time) string {
 	var lines []string
+	lines = append(lines, titleLine(ds))
+	lines = append(lines, "")
 	lines = append(lines, summaryLine(sum))
 	lines = append(lines, "")
 	lines = append(lines, trendLines(ds)...)
@@ -88,6 +123,9 @@ func trendLines(ds snapshot.MergedDataset) []string {
 				return ""
 			}
 			return shortDate(dates[i])
+		}),
+		asciigraph.YAxisValueFormatter(func(v float64) string {
+			return formatTokens(int64(v))
 		}),
 	)
 	return append([]string{"Trend:"}, strings.Split(graph, "\n")...)
@@ -208,20 +246,57 @@ func lastUpdatedLine(renderedAt time.Time) string {
 	return "Last updated: " + renderedAt.UTC().Format("2006-01-02 15:04 MST")
 }
 
-// formatTokens renders n with thousands separators for readability (e.g.
-// 12345 -> "12,345").
+// million and billion are the thresholds above which formatTokens switches
+// from comma-grouped digits to a shortened "X.YM"/"X.YB" unit, since cache
+// tokens (now folded into Tokens) routinely push daily totals into the tens
+// or hundreds of millions, where a raw digit string is hard to scan.
+const (
+	million = 1_000_000
+	billion = 1_000_000_000
+)
+
+// formatTokens renders n for display: thousands separators below one
+// million (e.g. 12345 -> "12,345"), otherwise a shortened unit suffix (e.g.
+// 12_345_678 -> "12.3M", 2_500_000_000 -> "2.5B").
 func formatTokens(n int64) string {
+	abs := n
+	neg := n < 0
+	if neg {
+		abs = -abs
+	}
+
+	var s string
+	switch {
+	case abs >= billion:
+		s = formatUnit(abs, billion, "B")
+	case abs >= million:
+		s = formatUnit(abs, million, "M")
+	default:
+		s = formatWithCommas(abs)
+	}
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+// formatUnit renders abs/divisor to one decimal place, dropping a trailing
+// ".0" (e.g. 2M rather than 2.0M), followed by suffix.
+func formatUnit(abs, divisor int64, suffix string) string {
+	s := strconv.FormatFloat(float64(abs)/float64(divisor), 'f', 1, 64)
+	return strings.TrimSuffix(s, ".0") + suffix
+}
+
+// formatWithCommas renders a non-negative n with thousands separators (e.g.
+// 12345 -> "12,345").
+func formatWithCommas(n int64) string {
 	s := strconv.FormatInt(n, 10)
-	s, neg := strings.CutPrefix(s, "-")
 	var out strings.Builder
 	for i := range len(s) {
 		if i > 0 && (len(s)-i)%3 == 0 {
 			out.WriteByte(',')
 		}
 		out.WriteByte(s[i])
-	}
-	if neg {
-		return "-" + out.String()
 	}
 	return out.String()
 }

@@ -7,29 +7,31 @@ It merges usage across all the machines you run it on using git itself as
 the sync layer: no server, no account, no hosted service.
 
 ```
-┌───────────────────────────────────────────────────┐
-│ Tokens: 2,700   Cost: $4.05                       │
-│                                                   │
-│ Trend:                                            │
-│  1195 ┤         ╭────────────╮                    │
-│  1079 ┼─────────╯            ╰──╮                 │
-│   963 ┤                         ╰──╮              │
-│   847 ┤                            ╰──╮           │
-│   732 ┤                               ╰───╮       │
-│   616 ┤                                   ╰──╮    │
-│   500 ┤                                      ╰    │
-│       └┬───────────────────┬──────────────────┬   │
-│      06-30               07-01              07-02 │
-│                       tokens/day                  │
-│                                                   │
-│ Streak: 3 days                                    │
-│                                                   │
-│ Breakdown (per model):                            │
-│   claude-sonnet-5 — 2,200 tokens ($3.30)          │
-│   gpt-5.4 — 500 tokens ($0.75)                    │
-│                                                   │
-│ Last updated: 2026-07-03 10:19 UTC                │
-└───────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ Token Profile — last 3 days                        │
+│                                                    │
+│ Tokens: 2,700   Cost: $4.05                        │
+│                                                    │
+│ Trend:                                             │
+│  1,200 ┼────────╮                                  │
+│  1,083 ┤        ╰──────────╮                       │
+│    966 ┤                   ╰────╮                  │
+│    850 ┤                        ╰───╮              │
+│    733 ┤                            ╰────╮         │
+│    616 ┤                                 ╰────╮    │
+│    500 ┤                                      ╰    │
+│        └┬───────────────────┬──────────────────┬   │
+│       06-30               07-01              07-02 │
+│                        tokens/day                  │
+│                                                    │
+│ Streak: 3 days                                     │
+│                                                    │
+│ Breakdown (per model):                             │
+│   claude-sonnet-5 — 2,200 tokens ($3.30)           │
+│   gpt-5.4 — 500 tokens ($0.75)                     │
+│                                                    │
+│ Last updated: 2026-07-03 10:19 UTC                 │
+└────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
@@ -128,11 +130,12 @@ Example:
 }
 ```
 
-**Note on token counts:** "tokens" throughout the card counts input+output
-(conversation) tokens only — prompt-cache creation/read tokens are
-deliberately excluded, since cache-read volume can dwarf actual conversation
-size and would otherwise make the headline number reflect cache mechanics
-rather than real usage.
+**Note on token counts:** "tokens" throughout the card counts input, output,
+prompt-cache creation, and prompt-cache read tokens together — every token
+dimension agentsview reports, matching what the shown cost is actually
+billed against. Totals of a million or more are shortened with a unit
+suffix (e.g. `12.3M`, `1.4B`) everywhere a token count is shown, including
+the trend graph's y-axis.
 
 ## How multi-machine sync works
 
