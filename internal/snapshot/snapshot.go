@@ -53,11 +53,13 @@ func validateMachineID(machineID string) error {
 	return nil
 }
 
-// Write persists rows as machineID's complete current snapshot under
-// targetRepo, fully replacing any prior snapshot for this machine. Resolve
-// always produces this machine's complete window each run, so a full
-// replace (rather than an append/delta) is correct: re-running on the same
-// day naturally overwrites rather than double-counts (see merge.go).
+// Write persists rows as machineID's current resolve, merged into whatever
+// snapshot already exists for this machine (see mergeRowsByKey): fresh rows
+// override any existing row sharing a (date, agent, model) key — so
+// re-running on the same day naturally overwrites rather than double-counts
+// — while rows for days the current resolve no longer covers are preserved,
+// so this machine's history accumulates across runs instead of rolling off
+// with the trailing window.
 func Write(targetRepo, machineID string, rows []Row) error {
 	if err := validateMachineID(machineID); err != nil {
 		return fmt.Errorf("writing snapshot: %w", err)
@@ -81,12 +83,24 @@ func Write(targetRepo, machineID string, rows []Row) error {
 		return fmt.Errorf("creating snapshots directory %s: %w", dir, err)
 	}
 
-	data, err := json.MarshalIndent(normalized, "", "  ")
+	path := snapshotPath(targetRepo, machineID)
+	existing, err := readSnapshotFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Deliberately fails rather than treating an unreadable file as
+		// empty: merging fresh rows over a silently-emptied existing file
+		// would permanently erase whatever history was still intact, unlike
+		// Merge's read-time tolerance (skip one bad file out of many),
+		// which risks nothing since it never writes anything back.
+		return fmt.Errorf("reading existing snapshot %s: %w", path, err)
+	}
+
+	merged := mergeRowsByKey(existing, normalized)
+
+	data, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding snapshot for machine %s: %w", machineID, err)
 	}
 
-	path := snapshotPath(targetRepo, machineID)
 	if err := writeFileAtomic(dir, path, data); err != nil {
 		return fmt.Errorf("writing snapshot %s: %w", path, err)
 	}

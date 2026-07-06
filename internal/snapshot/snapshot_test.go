@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Christophe1997/token-profile/internal/snapshot"
 )
@@ -219,12 +220,13 @@ func TestMerge_StaleSnapshot_ContributesHistoricalRows(t *testing.T) {
 	}
 }
 
-// TestMerge_MachineRerun_SecondWriteReplacesFirst covers the re-run
-// overwrite semantics: Write always fully replaces a machine's file with
-// its current complete dataset, so calling Write twice for the same machine
-// with different row sets must leave only the second write's data in the
-// merge — never a sum of both writes.
-func TestMerge_MachineRerun_SecondWriteReplacesFirst(t *testing.T) {
+// TestMerge_MachineRerun_SameKeyOverridesNotSums covers the re-run overwrite
+// semantics: Write merges by (date, agent, model) key, so calling Write
+// twice for the same machine with a row sharing a key must leave only the
+// second write's value for that key — never a sum of both writes (which
+// would double-count a day agentsview re-reports on every run it's still
+// inside the trailing window).
+func TestMerge_MachineRerun_SameKeyOverridesNotSums(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := snapshot.Write(dir, "machine-a", []snapshot.Row{
@@ -246,6 +248,135 @@ func TestMerge_MachineRerun_SecondWriteReplacesFirst(t *testing.T) {
 	got := mergedRow(t, ds, "2026-06-20", "claude-code", "claude-sonnet-5")
 	if want := (snapshot.Row{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 130, Cost: 1.3}); got != want {
 		t.Errorf("merged row = %+v, want %+v (only the second write's data, not summed with the first)", got, want)
+	}
+}
+
+// TestWrite_AccumulatesDisjointDatesAcrossRuns covers history accumulation:
+// once a day rolls out of the trailing window a later run resolves, Write
+// must not drop that day from this machine's snapshot — a machine's file
+// grows to hold every day it has ever recorded, not just the latest run's
+// window.
+func TestWrite_AccumulatesDisjointDatesAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := snapshot.Write(dir, "machine-a", []snapshot.Row{
+		{Date: "2026-05-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+	}); err != nil {
+		t.Fatalf("first Write() error = %v, want nil", err)
+	}
+	// A later run's resolve window no longer covers 2026-05-01, so it isn't
+	// in this second call's rows at all.
+	if err := snapshot.Write(dir, "machine-a", []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
+	}); err != nil {
+		t.Fatalf("second Write() error = %v, want nil", err)
+	}
+
+	got, err := snapshot.Read(dir, "machine-a")
+	if err != nil {
+		t.Fatalf("Read() error = %v, want nil", err)
+	}
+
+	want := []snapshot.Row{
+		{Date: "2026-05-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Read() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Read()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestWrite_SameKeyOverride_LeavesOtherKeysUntouched covers partial overlap:
+// a second write that only refreshes one (date, agent, model) key must
+// leave every other previously recorded key exactly as it was.
+func TestWrite_SameKeyOverride_LeavesOtherKeysUntouched(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := snapshot.Write(dir, "machine-a", []snapshot.Row{
+		{Date: "2026-06-19", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-20", Agent: "codex", Model: "gpt-5.4", Tokens: 20, Cost: 0.2},
+	}); err != nil {
+		t.Fatalf("first Write() error = %v, want nil", err)
+	}
+	if err := snapshot.Write(dir, "machine-a", []snapshot.Row{
+		{Date: "2026-06-20", Agent: "codex", Model: "gpt-5.4", Tokens: 40, Cost: 0.4},
+	}); err != nil {
+		t.Fatalf("second Write() error = %v, want nil", err)
+	}
+
+	got, err := snapshot.Read(dir, "machine-a")
+	if err != nil {
+		t.Fatalf("Read() error = %v, want nil", err)
+	}
+
+	want := []snapshot.Row{
+		{Date: "2026-06-19", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-20", Agent: "codex", Model: "gpt-5.4", Tokens: 40, Cost: 0.4},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Read() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Read()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestWrite_CorruptedExistingSnapshot_FailsRatherThanDiscardingHistory
+// covers a deliberately conservative failure mode: if this machine's own
+// on-disk snapshot can't be parsed, Write must fail loudly rather than
+// silently treating it as empty — merging fresh rows over a
+// silently-emptied existing file would permanently erase whatever history
+// was still intact, which merge.go's own read-time tolerance (skip one bad
+// file out of many) would not otherwise risk.
+func TestWrite_CorruptedExistingSnapshot_FailsRatherThanDiscardingHistory(t *testing.T) {
+	dir := t.TempDir()
+	snapshotsDir := filepath.Join(dir, ".token-profile", "snapshots")
+	if err := os.MkdirAll(snapshotsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshotsDir, "machine-a.json"), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	err := snapshot.Write(dir, "machine-a", []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+	})
+	if err == nil {
+		t.Fatal("Write() error = nil, want an error for a corrupted existing snapshot")
+	}
+}
+
+// TestFilterSince_KeepsOnlyRowsOnOrAfterCutoff covers the window-filtering
+// helper cli/run.go uses to scope an accumulated (potentially multi-window)
+// MergedDataset down to "the current window" before rendering.
+func TestFilterSince_KeepsOnlyRowsOnOrAfterCutoff(t *testing.T) {
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-05-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
+		{Date: "2026-06-21", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 60, Cost: 0.6},
+	}}
+	since := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	got := snapshot.FilterSince(ds, since)
+
+	want := []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
+		{Date: "2026-06-21", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 60, Cost: 0.6},
+	}
+	if len(got.Rows) != len(want) {
+		t.Fatalf("FilterSince() = %+v, want %+v", got.Rows, want)
+	}
+	for i := range want {
+		if got.Rows[i] != want[i] {
+			t.Errorf("FilterSince().Rows[%d] = %+v, want %+v", i, got.Rows[i], want[i])
+		}
 	}
 }
 

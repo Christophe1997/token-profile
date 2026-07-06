@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 )
 
 // mergeKey identifies one (date, agent, model) bucket that multiple
@@ -28,9 +29,10 @@ type MergedDataset struct {
 // Merge reads every snapshot file under targetRepo's snapshots directory
 // and unions their rows, summing different machines' contributions to the
 // same (date, agent, model) bucket. Each machine's own file already holds
-// that machine's complete, current history (Write always fully replaces
-// it), so a machine re-running never inflates its own totals here — only
-// distinct machines' rows are additive.
+// that machine's complete accumulated history, deduplicated by key (Write
+// merges rather than replaces — see mergeRowsByKey), so a machine
+// re-running never inflates its own totals here — only distinct machines'
+// rows are additive.
 //
 // A snapshot file that fails to parse (corrupted or a partial write) is
 // skipped with a logged warning rather than aborting the whole merge, so
@@ -81,4 +83,48 @@ func Merge(targetRepo string) (MergedDataset, error) {
 		)
 	})
 	return MergedDataset{Rows: rows}, nil
+}
+
+// mergeRowsByKey unions existing and fresh by (date, agent, model),
+// preferring fresh's value whenever both share a key: fresh always reflects
+// the latest resolve for whatever days it covers, so it wins on overlap
+// (re-running the same day never double-counts). Rows found only in
+// existing — days that have since rolled out of the resolve window — are
+// preserved rather than dropped, so a machine's snapshot accumulates
+// history across runs instead of rolling off with the trailing window. The
+// result is sorted by (date, agent, model) for a stable, human-diffable
+// on-disk order.
+func mergeRowsByKey(existing, fresh []Row) []Row {
+	merged := make(map[mergeKey]Row, len(existing)+len(fresh))
+	for _, r := range existing {
+		merged[mergeKey{Date: r.Date, Agent: r.Agent, Model: r.Model}] = r
+	}
+	for _, r := range fresh {
+		merged[mergeKey{Date: r.Date, Agent: r.Agent, Model: r.Model}] = r
+	}
+	rows := slices.Collect(maps.Values(merged))
+	slices.SortFunc(rows, func(a, b Row) int {
+		return cmp.Or(
+			cmp.Compare(a.Date, b.Date),
+			cmp.Compare(a.Agent, b.Agent),
+			cmp.Compare(a.Model, b.Model),
+		)
+	})
+	return rows
+}
+
+// FilterSince returns the subset of ds.Rows dated on or after since
+// (inclusive), preserving order — the window-scoping step cli/run.go
+// applies to an accumulated (potentially multi-window) MergedDataset before
+// handing it to render.Render, so trend/breakdown reflect only the current
+// window rather than a machine's full accumulated history.
+func FilterSince(ds MergedDataset, since time.Time) MergedDataset {
+	cutoff := since.UTC().Format(time.DateOnly)
+	var out MergedDataset
+	for _, r := range ds.Rows {
+		if r.Date >= cutoff {
+			out.Rows = append(out.Rows, r)
+		}
+	}
+	return out
 }
