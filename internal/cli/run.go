@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,12 @@ type RunDeps struct {
 	// Kept separate from Config.TargetRepo so tests can point it at a
 	// scratch git fixture without constructing a full config file.
 	RepoDir string
+	// Stdout receives a one-line confirmation — the headline summary plus
+	// the just-published commit's short hash — after a successful
+	// publish. Nil is valid and silently discards this output, so every
+	// existing RunDeps literal that doesn't set it keeps behaving exactly
+	// as before.
+	Stdout io.Writer
 }
 
 // Run executes the end-to-end refresh flow: resolve this machine's usage,
@@ -113,7 +120,48 @@ func run(ctx context.Context, deps RunDeps) error {
 		return fmt.Errorf("publishing: %w", err)
 	}
 
+	writeSuccessSummary(ctx, deps)
 	return nil
+}
+
+// writeSuccessSummary writes a best-effort one-line confirmation to
+// deps.Stdout after a successful publish: the merged headline summary plus
+// the just-published commit's short hash. It never fails run() — the
+// publish has already landed by this point, so a glitch summarizing it
+// (e.g. a transient git failure resolving HEAD) degrades to a fallback
+// line rather than making an otherwise-successful run report as an error.
+func writeSuccessSummary(ctx context.Context, deps RunDeps) {
+	if deps.Stdout == nil {
+		return
+	}
+	merged, err := snapshot.Merge(deps.RepoDir)
+	if err != nil {
+		fmt.Fprintf(deps.Stdout, "published successfully, but computing the summary failed: %v\n", err)
+		return
+	}
+	sum := summary.Compute(merged, deps.Now)
+	commit, err := headCommit(ctx, deps.RepoDir)
+	if err != nil {
+		fmt.Fprintf(deps.Stdout, "%s (resolving the published commit hash failed: %v)\n", render.Headline(sum), err)
+		return
+	}
+	fmt.Fprintf(deps.Stdout, "%s — published as %s\n", render.Headline(sum), commit)
+}
+
+// headCommit resolves repoDir's current HEAD as a short hash, mirroring
+// requireGitWorkTree's own os/exec invocation pattern in this file. Called
+// only after gitops.Publish has already succeeded, so HEAD is the commit
+// that was just pushed.
+func headCommit(ctx context.Context, repoDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD")
+	cmd.Dir = repoDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git rev-parse --short HEAD: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // requireGitWorkTree verifies repoDir is a real, existing git working tree
@@ -256,6 +304,7 @@ func NewRunCmd() *cobra.Command {
 				MachineID: machineID,
 				Now:       time.Now().UTC(),
 				RepoDir:   cfg.TargetRepo,
+				Stdout:    cmd.OutOrStdout(),
 			}
 			return Run(cmd.Context(), deps)
 		},

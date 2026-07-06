@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -133,6 +134,51 @@ func TestInit_EndToEnd_FreshRepo(t *testing.T) {
 	log := runGitT(t, verify, "log", "--oneline")
 	if !strings.Contains(log, "token-profile") {
 		t.Errorf("git log = %q, want the first run's commit to have landed on the remote", log)
+	}
+}
+
+// TestInit_Success_PrintsHeadlineAndCommitHash covers the fix: a successful
+// Init must print the same one-line confirmation as Run — the headline
+// summary plus the just-published commit's short hash — through the shared
+// run() core.
+func TestInit_Success_PrintsHeadlineAndCommitHash(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	work := cloneWorkdir(t, remote, "init-summary")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	var buf bytes.Buffer
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-init",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      work,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+		Stdout:       &buf,
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	hash := strings.TrimSpace(runGitT(t, work, "rev-parse", "--short", "HEAD"))
+	got := buf.String()
+	if !strings.Contains(got, "Tokens:") {
+		t.Errorf("Init() Stdout = %q, want it to contain %q", got, "Tokens:")
+	}
+	if !strings.Contains(got, "Streak:") {
+		t.Errorf("Init() Stdout = %q, want it to contain %q", got, "Streak:")
+	}
+	if !strings.Contains(got, "published as") {
+		t.Errorf("Init() Stdout = %q, want it to contain %q", got, "published as")
+	}
+	if !strings.Contains(got, hash) {
+		t.Errorf("Init() Stdout = %q, want it to contain the published commit's short hash %q", got, hash)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,6 +61,11 @@ type InitDeps struct {
 	// ConfigPath is the --config value the scheduling entry passes to
 	// `token-profile run`.
 	ConfigPath string
+	// Stdout receives the same post-publish confirmation as RunDeps.Stdout
+	// — propagated into the RunDeps Init builds internally below, so init
+	// gets this output through the same shared run() core, no separate
+	// implementation.
+	Stdout io.Writer
 }
 
 // Init performs one-command setup (R10, R11, F3): it scaffolds the
@@ -106,6 +112,7 @@ func Init(ctx context.Context, deps InitDeps) error {
 		MachineID: deps.MachineID,
 		Now:       deps.Now,
 		RepoDir:   deps.RepoDir,
+		Stdout:    deps.Stdout,
 	})
 }
 
@@ -276,6 +283,7 @@ func NewInitCmd() *cobra.Command {
 				ScheduleDest: scheduleDest,
 				BinaryPath:   binaryPath,
 				ConfigPath:   configPath,
+				Stdout:       cmd.OutOrStdout(),
 			}
 			return Init(cmd.Context(), deps)
 		},

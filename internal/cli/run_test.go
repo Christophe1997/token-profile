@@ -421,6 +421,47 @@ func TestRun_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
 	}
 }
 
+// TestRun_Success_PrintsHeadlineAndCommitHash covers the fix: a successful
+// Run must print a one-line confirmation to Stdout — the headline summary
+// plus the just-published commit's short hash — so an adopter running the
+// command sees what was published rather than silence.
+func TestRun_Success_PrintsHeadlineAndCommitHash(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	var buf bytes.Buffer
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-solo",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+		Stdout:    &buf,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	hash := strings.TrimSpace(runGitT(t, work, "rev-parse", "--short", "HEAD"))
+	got := buf.String()
+	if !strings.Contains(got, "Tokens:") {
+		t.Errorf("Run() Stdout = %q, want it to contain %q", got, "Tokens:")
+	}
+	if !strings.Contains(got, "Streak:") {
+		t.Errorf("Run() Stdout = %q, want it to contain %q", got, "Streak:")
+	}
+	if !strings.Contains(got, "published as") {
+		t.Errorf("Run() Stdout = %q, want it to contain %q", got, "published as")
+	}
+	if !strings.Contains(got, hash) {
+		t.Errorf("Run() Stdout = %q, want it to contain the published commit's short hash %q", got, hash)
+	}
+}
+
 // TestFenceCard verifies fenceCard wraps its input in a plain (no language
 // tag) fenced code block with no trailing newline after the closing fence,
 // matching README.md's own Quick Start example.

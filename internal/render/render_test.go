@@ -231,6 +231,31 @@ func TestRender_GoldenFile(t *testing.T) {
 	}
 }
 
+// TestHeadline_FormatsTokensCostAndStreak covers the plain-text confirmation
+// line's happy path: tokens, cost, and a plural-day streak, in that order.
+func TestHeadline_FormatsTokensCostAndStreak(t *testing.T) {
+	sum := summary.Summary{TotalTokens: 4100, TotalCost: 6.95, Streak: 3}
+
+	got := render.Headline(sum)
+
+	const want = "Tokens: 4,100   Cost: $6.95   Streak: 3 days"
+	if got != want {
+		t.Errorf("Headline() = %q, want %q", got, want)
+	}
+}
+
+// TestHeadline_SingularDayStreak covers the singular/plural edge case: a
+// one-day streak must say "day", not "days".
+func TestHeadline_SingularDayStreak(t *testing.T) {
+	sum := summary.Summary{TotalTokens: 100, TotalCost: 1.0, Streak: 1}
+
+	got := render.Headline(sum)
+
+	if !strings.HasSuffix(got, "Streak: 1 day") {
+		t.Errorf("Headline() = %q, want suffix %q", got, "Streak: 1 day")
+	}
+}
+
 func firstLine(s string) string {
 	before, _, _ := strings.Cut(s, "\n")
 	return before

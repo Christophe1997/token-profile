@@ -44,6 +44,14 @@ func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.Breakdow
 	return box(lines)
 }
 
+// Headline renders sum as a single confirmation line — "Tokens: X   Cost:
+// $Y   Streak: N days", no box — reusing summaryLine and streakLine so
+// callers that want a plain-text confirmation (rather than the full
+// bordered card) don't duplicate render's own token/cost/streak formatting.
+func Headline(sum summary.Summary) string {
+	return summaryLine(sum) + "   " + streakLine(sum)
+}
+
 func summaryLine(sum summary.Summary) string {
 	return fmt.Sprintf("Tokens: %s   Cost: $%.2f", formatTokens(sum.TotalTokens), sum.TotalCost)
 }
