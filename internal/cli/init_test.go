@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,6 +239,183 @@ func TestInit_Rerun_NoOp(t *testing.T) {
 	}
 }
 
+// TestSchedulingEntryContent_Darwin_UsesConfiguredInterval and
+// TestSchedulingEntryContent_Cron_UsesConfiguredInterval cover the fix: the
+// scheduling snippet must reflect the configured ScheduleInterval instead
+// of the old hardcoded 6-hour cycle (KTD10 supersedes 21600/"0 */6 * * *").
+func TestSchedulingEntryContent_Darwin_UsesConfiguredInterval(t *testing.T) {
+	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", 4*time.Hour)
+	if !strings.Contains(got, "<integer>14400</integer>") {
+		t.Errorf("schedulingEntryContent() = %q, want StartInterval 14400 for a 4h interval", got)
+	}
+	if strings.Contains(got, "<integer>21600</integer>") {
+		t.Errorf("schedulingEntryContent() = %q, want the old hardcoded 21600 gone", got)
+	}
+}
+
+func TestSchedulingEntryContent_Cron_UsesConfiguredInterval(t *testing.T) {
+	got := schedulingEntryContent("linux", "/usr/local/bin/token-profile", "/config.json", 4*time.Hour)
+	if !strings.Contains(got, "0 */4 * * *") {
+		t.Errorf("schedulingEntryContent() = %q, want cron field */4 for a 4h interval", got)
+	}
+	if strings.Contains(got, "0 */6 * * *") {
+		t.Errorf("schedulingEntryContent() = %q, want the old hardcoded */6 gone", got)
+	}
+}
+
+// TestSchedulingEntryContent_ZeroInterval_DefaultsToConfigDefault covers an
+// InitDeps literal built directly by a test, bypassing config.Load's
+// Default() layering: a zero interval must still render a sane cadence
+// rather than a nonsensical StartInterval 0 / "*/0" cron field.
+func TestSchedulingEntryContent_ZeroInterval_DefaultsToConfigDefault(t *testing.T) {
+	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", 0)
+	want := fmt.Sprintf("<integer>%d</integer>", scheduleIntervalSeconds(config.DefaultScheduleInterval))
+	if !strings.Contains(got, want) {
+		t.Errorf("schedulingEntryContent(interval=0) = %q, want it to default to %q", got, want)
+	}
+}
+
+// TestInit_ScheduleRegistrationAccepted_InstallsSchedule covers R4's happy
+// path: after a successful init, accepting the schedule-registration prompt
+// must actually install it (via U4's InstallSchedule), not just write the
+// reviewable snippet.
+func TestInit_ScheduleRegistrationAccepted_InstallsSchedule(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-accept")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	schedDir := t.TempDir()
+	statePath := filepath.Join(schedDir, "state")
+	capturePath := filepath.Join(schedDir, "capture")
+	launchctlBin := fakeLaunchctlBinary(t, statePath, capturePath)
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work, ScheduleInterval: 4 * time.Hour},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-accept",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(schedDir, "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Register the refresh schedule now?") {
+		t.Errorf("Init() Stdout = %q, want the schedule-registration prompt to have been shown", stdout.String())
+	}
+
+	captured := readCaptureFile(t, capturePath)
+	foundBootstrap := false
+	for _, line := range captured {
+		if strings.HasPrefix(line, "bootstrap ") {
+			foundBootstrap = true
+		}
+	}
+	if !foundBootstrap {
+		t.Errorf("captured launchctl invocations = %v, want a bootstrap call", captured)
+	}
+}
+
+// TestInit_ScheduleRegistrationAccepted_InstallFails_ReportsWarningExitsZero
+// covers KTD17: a failed live install attempt (e.g. a permission-restricted
+// LaunchAgents directory, simulated here by a launchctl fixture that always
+// fails) must degrade to a reported warning rather than a non-zero exit —
+// clone/config/first-publish have already succeeded by this point.
+func TestInit_ScheduleRegistrationAccepted_InstallFails_ReportsWarningExitsZero(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-fail")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+	capturePath := filepath.Join(t.TempDir(), "capture")
+	launchctlBin := fakeLaunchctlBinaryAlwaysFails(t, capturePath)
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-fail",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(t.TempDir(), "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil (a failed schedule install must degrade to a warning, KTD17)", err)
+	}
+	if !strings.Contains(stdout.String(), "warning") {
+		t.Errorf("Init() Stdout = %q, want a warning about the failed schedule install", stdout.String())
+	}
+}
+
+// TestInit_ScheduleRegistrationDeclined_SnippetWrittenNoInstallAttempted
+// covers the declined-prompt integration scenario: the reviewable snippet
+// at --schedule-dest is still written regardless, but no live install is
+// ever attempted.
+func TestInit_ScheduleRegistrationDeclined_SnippetWrittenNoInstallAttempted(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-decline")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-decline",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("n\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			// A deliberately-broken path: if InstallSchedule were ever
+			// invoked despite the decline, resolving this would fail loudly
+			// rather than silently succeeding.
+			Launchctl: filepath.Join(t.TempDir(), "no-such-launchctl"),
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+	if _, err := os.Stat(scheduleDest); err != nil {
+		t.Errorf("scheduling entry %s missing after decline: %v", scheduleDest, err)
+	}
+	if strings.Contains(stdout.String(), "warning") {
+		t.Errorf("Init() Stdout = %q, want no install-failure warning when declined", stdout.String())
+	}
+}
+
 // TestInit_TargetRepoNotGitRepo_FailsFast covers Fix 3: a RepoDir that
 // exists but isn't a git working tree must fail fast with an actionable
 // error, before Init scaffolds anything (README markers, scheduling entry,
@@ -300,86 +478,6 @@ func TestInit_TargetRepoDoesNotExist_FailsFast(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("Stat(RepoDir) error = %v, want os.ErrNotExist (RepoDir itself must not be created as a side effect)", statErr)
-	}
-}
-
-// TestLoadOrScaffoldConfig_NoConfigFile_ScaffoldsAndReturnsGuidedError covers
-// a first-time adopter: no config file exists yet at configPath, so
-// loadOrScaffoldConfig must scaffold a starter template and return a guided
-// error pointing at it, rather than the generic errTargetRepoMissing.
-func TestLoadOrScaffoldConfig_NoConfigFile_ScaffoldsAndReturnsGuidedError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-
-	_, err := loadOrScaffoldConfig(path)
-	if err == nil {
-		t.Fatal("loadOrScaffoldConfig() error = nil, want a guided scaffold error")
-	}
-	if !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("loadOrScaffoldConfig() error = %q, want it to mention %q", err.Error(), "created a starter config")
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("loadOrScaffoldConfig() error = %q, want it to mention the config path %q", err.Error(), path)
-	}
-
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load() on scaffolded config error = %v, want nil", err)
-	}
-	if cfg.TargetRepo != "" {
-		t.Errorf("scaffolded TargetRepo = %q, want empty", cfg.TargetRepo)
-	}
-	if cfg.Breakdown != config.BreakdownPerModel {
-		t.Errorf("scaffolded Breakdown = %q, want %q", cfg.Breakdown, config.BreakdownPerModel)
-	}
-}
-
-// TestLoadOrScaffoldConfig_ExistingBlankTargetRepo_ReturnsConfigUnmodified
-// covers a deliberately-edited config that still has a blank targetRepo:
-// loadOrScaffoldConfig must not scaffold over it, leaving the caller's
-// existing errTargetRepoMissing check to fire unchanged.
-func TestLoadOrScaffoldConfig_ExistingBlankTargetRepo_ReturnsConfigUnmodified(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "config.json", `{"breakdown":"per-model"}`)
-	path := filepath.Join(dir, "config.json")
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	cfg, err := loadOrScaffoldConfig(path)
-	if err != nil {
-		t.Fatalf("loadOrScaffoldConfig() error = %v, want nil", err)
-	}
-	if cfg.TargetRepo != "" {
-		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
-	}
-
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	if string(before) != string(after) {
-		t.Errorf("config file changed: before %q, after %q", before, after)
-	}
-}
-
-// TestLoadOrScaffoldConfig_RerunAfterScaffold_ReturnsBlankTargetRepoNotGuidedError
-// covers re-running init after a first scaffold: the second call must find
-// the now-existing file via stat and return the loaded config plainly,
-// rather than scaffolding (and erroring) again.
-func TestLoadOrScaffoldConfig_RerunAfterScaffold_ReturnsBlankTargetRepoNotGuidedError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-
-	if _, err := loadOrScaffoldConfig(path); err == nil {
-		t.Fatal("loadOrScaffoldConfig() first call error = nil, want the guided scaffold error")
-	}
-
-	cfg, err := loadOrScaffoldConfig(path)
-	if err != nil {
-		t.Fatalf("loadOrScaffoldConfig() second call error = %v, want nil", err)
-	}
-	if cfg.TargetRepo != "" {
-		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
 	}
 }
 
@@ -474,16 +572,16 @@ func TestValidAutoCloneName(t *testing.T) {
 
 func TestProfileRepoURL(t *testing.T) {
 	tests := []struct {
-		protocol string
+		protocol config.CloneProtocol
 		want     string
 		wantErr  bool
 	}{
-		{cloneProtocolSSH, "git@github.com:octocat/octocat.git", false},
-		{cloneProtocolHTTPS, "https://github.com/octocat/octocat.git", false},
+		{config.CloneProtocolSSH, "git@github.com:octocat/octocat.git", false},
+		{config.CloneProtocolHTTPS, "https://github.com/octocat/octocat.git", false},
 		{"bogus", "", true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.protocol, func(t *testing.T) {
+		t.Run(string(tt.protocol), func(t *testing.T) {
 			got, err := profileRepoURL(tt.protocol, "octocat")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("profileRepoURL() error = %v, wantErr %v", err, tt.wantErr)
@@ -495,33 +593,7 @@ func TestProfileRepoURL(t *testing.T) {
 	}
 }
 
-// TestCloneProfileRepo_CreatesMissingParentDirs covers the fix: dest's
-// parent directory (~/.token-profile/repos, on a genuinely fresh machine)
-// won't exist yet, so cloneProfileRepo must create it before cloning.
-func TestCloneProfileRepo_CreatesMissingParentDirs(t *testing.T) {
-	remote := initBareRemote(t)
-	seedRemote(t, remote, unmarkedReadme)
-	dest := filepath.Join(t.TempDir(), "nested", "missing", "octocat")
-
-	if err := cloneProfileRepo(t.Context(), remote, dest); err != nil {
-		t.Fatalf("cloneProfileRepo() error = %v, want nil", err)
-	}
-
-	out := runGitT(t, dest, "rev-parse", "--is-inside-work-tree")
-	if strings.TrimSpace(out) != "true" {
-		t.Errorf("git rev-parse --is-inside-work-tree = %q, want %q", out, "true")
-	}
-}
-
-func TestCloneProfileRepo_BadURL_ReturnsError(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "octocat")
-
-	if err := cloneProfileRepo(t.Context(), filepath.Join(t.TempDir(), "no-such-remote"), dest); err == nil {
-		t.Fatal("cloneProfileRepo() error = nil, want an error for a nonexistent remote")
-	}
-}
-
-func TestConfirmAutoClone(t *testing.T) {
+func TestConfirmYesNo(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -540,251 +612,326 @@ func TestConfirmAutoClone(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout bytes.Buffer
-			got := confirmAutoClone(strings.NewReader(tt.input), &stdout, "git@github.com:octocat/octocat.git", "/home/adopter/.token-profile/repos/octocat")
+			got := confirmYesNo(strings.NewReader(tt.input), &stdout, "Proceed?")
 			if got != tt.want {
-				t.Errorf("confirmAutoClone(%q) = %v, want %v", tt.input, got, tt.want)
+				t.Errorf("confirmYesNo(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestConfirmAutoClone_PromptContainsURLAndDest(t *testing.T) {
+// TestConfirmYesNo_NilStdin_ReturnsFalse covers offerScheduleRegistration's
+// own defensive use: a nil deps.Stdin (e.g. a test InitDeps literal that
+// never sets it) must read as a plain "no" rather than panicking on a nil
+// io.Reader.
+func TestConfirmYesNo_NilStdin_ReturnsFalse(t *testing.T) {
+	if confirmYesNo(nil, &bytes.Buffer{}, "Proceed?") {
+		t.Error("confirmYesNo(nil stdin) = true, want false")
+	}
+}
+
+func TestConfirmYesNo_PromptContainsQuestion(t *testing.T) {
 	var stdout bytes.Buffer
-	confirmAutoClone(strings.NewReader("n\n"), &stdout, "git@github.com:octocat/octocat.git", "/home/adopter/.token-profile/repos/octocat")
+	confirmYesNo(strings.NewReader("n\n"), &stdout, "Register the refresh schedule now?")
 
-	got := stdout.String()
-	if !strings.Contains(got, "git@github.com:octocat/octocat.git") {
-		t.Errorf("confirmAutoClone() prompt = %q, want it to mention the clone URL", got)
-	}
-	if !strings.Contains(got, "/home/adopter/.token-profile/repos/octocat") {
-		t.Errorf("confirmAutoClone() prompt = %q, want it to mention the destination", got)
+	if !strings.Contains(stdout.String(), "Register the refresh schedule now?") {
+		t.Errorf("confirmYesNo() prompt = %q, want it to contain the question", stdout.String())
 	}
 }
 
-// failIfCalledGitUserName and failIfCalledClone build hooks for
-// bootstrapDeps that fail the test if invoked — used across the
-// bootstrapConfig tests below to prove the auto-clone shortcut's hooks
-// stay untouched whenever it shouldn't apply.
-func failIfCalledGitUserName(t *testing.T) func(ctx context.Context) string {
-	t.Helper()
-	return func(ctx context.Context) string {
-		t.Fatal("GitUserName was called, want it untouched")
-		return ""
-	}
-}
-
-func failIfCalledClone(t *testing.T) func(ctx context.Context, url, dest string) error {
-	t.Helper()
-	return func(ctx context.Context, url, dest string) error {
-		t.Fatal("Clone was called, want it untouched")
-		return nil
-	}
-}
-
-// TestBootstrapConfig_ConfigAlreadyExists_DelegatesToLoadOrScaffold covers
-// the case where a config file already sits at ConfigPath (even with a
-// blank targetRepo): bootstrapConfig must not offer the auto-clone
-// shortcut at all, regardless of Interactive.
-func TestBootstrapConfig_ConfigAlreadyExists_DelegatesToLoadOrScaffold(t *testing.T) {
+// TestRequireConfigOrTTY_NoConfigNoTTY_ReturnsActionableErrorNothingWritten
+// covers R5/AE1: a config-needing command (run, or the guided-init entry
+// point) invoked with no config file yet and no interactive terminal must
+// fail immediately, naming the missing path and pointing at interactive
+// init, without writing anything to disk. requireConfigOrTTY is tested
+// directly (rather than through NewRunCmd's cobra wiring) since a plain `go
+// test` run can't deterministically control the real process's os.Stdin
+// TTY-ness.
+func TestRequireConfigOrTTY_NoConfigNoTTY_ReturnsActionableErrorNothingWritten(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "config.json", `{"breakdown":"per-model"}`)
-	path := filepath.Join(dir, "config.json")
+	configPath := filepath.Join(dir, "config.json")
 
-	cfg, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:  path,
-		Interactive: true,
-		Stdin:       strings.NewReader(""),
-		Stdout:      &bytes.Buffer{},
-		GitUserName: failIfCalledGitUserName(t),
-		Clone:       failIfCalledClone(t),
-	})
-	if err != nil {
-		t.Fatalf("bootstrapConfig() error = %v, want nil", err)
+	err := requireConfigOrTTY(configPath, false)
+	if err == nil {
+		t.Fatal("requireConfigOrTTY() error = nil, want an error")
 	}
-	if cfg.TargetRepo != "" {
-		t.Errorf("TargetRepo = %q, want empty", cfg.TargetRepo)
+	if !strings.Contains(err.Error(), configPath) {
+		t.Errorf("requireConfigOrTTY() error = %q, want it to mention the config path %q", err.Error(), configPath)
+	}
+	if !strings.Contains(err.Error(), "init") {
+		t.Errorf("requireConfigOrTTY() error = %q, want it to point at interactive init", err.Error())
+	}
+	if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(config) error = %v, want os.ErrNotExist (nothing written)", statErr)
 	}
 }
 
-// TestBootstrapConfig_NonInteractive_FallsBack covers a scheduled
-// cron/launchd invocation: no config file, but Interactive is false, so the
-// shortcut must never engage.
-func TestBootstrapConfig_NonInteractive_FallsBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+func TestRequireConfigOrTTY_ConfigExists_ReturnsNilRegardlessOfTTY(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", `{}`)
+	configPath := filepath.Join(dir, "config.json")
 
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:  path,
+	if err := requireConfigOrTTY(configPath, false); err != nil {
+		t.Errorf("requireConfigOrTTY() error = %v, want nil when a config file already exists", err)
+	}
+}
+
+func TestRequireConfigOrTTY_NoConfigButInteractive_ReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	if err := requireConfigOrTTY(configPath, true); err != nil {
+		t.Errorf("requireConfigOrTTY() error = %v, want nil when interactive", err)
+	}
+}
+
+// TestResolveInitConfig_ConfigAlreadyExists_DelegatesStraightToLoad covers
+// the edge case: a config file already sitting at ConfigPath must be loaded
+// as-is, with the wizard never invoked at all — regardless of Interactive.
+func TestResolveInitConfig_ConfigAlreadyExists_DelegatesStraightToLoad(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", `{"targetRepo":"/some/repo","breakdown":"per-model"}`)
+	configPath := filepath.Join(dir, "config.json")
+
+	cfg, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
+		Interactive: true,
+		Wizard: WizardDeps{
+			GitUserName: func(context.Context) string {
+				t.Fatal("GitUserName was called, want the wizard untouched when a config already exists")
+				return ""
+			},
+		},
+		ResolveCloneURL: func(config.CloneProtocol, string) (string, error) {
+			t.Fatal("ResolveCloneURL was called, want the wizard untouched when a config already exists")
+			return "", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveInitConfig() error = %v, want nil", err)
+	}
+	if cfg.TargetRepo != "/some/repo" {
+		t.Errorf("cfg.TargetRepo = %q, want %q", cfg.TargetRepo, "/some/repo")
+	}
+}
+
+// TestResolveInitConfig_NoConfigNoTTY_FailsFastNothingWritten covers R5/AE1
+// on the init path directly.
+func TestResolveInitConfig_NoConfigNoTTY_FailsFastNothingWritten(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	_, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
 		Interactive: false,
-		Stdin:       strings.NewReader(""),
 		Stdout:      &bytes.Buffer{},
-		GitUserName: failIfCalledGitUserName(t),
-		Clone:       failIfCalledClone(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
-	}
-}
-
-// TestBootstrapConfig_NoGitUserName_FallsBack covers an interactive session
-// where git's global user.name is unset.
-func TestBootstrapConfig_NoGitUserName_FallsBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:  path,
-		Interactive: true,
-		Stdin:       strings.NewReader(""),
-		Stdout:      &bytes.Buffer{},
-		GitUserName: func(ctx context.Context) string { return "" },
-		Clone:       failIfCalledClone(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
-	}
-}
-
-// TestBootstrapConfig_UnsafeGitUserName_FallsBack proves validAutoCloneName
-// is actually wired into bootstrapConfig, not just unit-tested standalone.
-func TestBootstrapConfig_UnsafeGitUserName_FallsBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:  path,
-		Interactive: true,
-		Stdin:       strings.NewReader(""),
-		Stdout:      &bytes.Buffer{},
-		GitUserName: func(ctx context.Context) string { return "../escape" },
-		Clone:       failIfCalledClone(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
-	}
-}
-
-// TestBootstrapConfig_UserDeclines_FallsBackButShowsPrompt covers a
-// declined confirmation: the shortcut must still fall back to the plain
-// scaffold, but only after actually showing the prompt (proving the
-// decline was a real choice, not a short-circuit before asking).
-func TestBootstrapConfig_UserDeclines_FallsBackButShowsPrompt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	var stdout bytes.Buffer
-
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:    path,
-		Interactive:   true,
-		Stdin:         strings.NewReader("n\n"),
-		Stdout:        &stdout,
-		CloneProtocol: cloneProtocolSSH,
-		GitUserName:   func(ctx context.Context) string { return "octocat" },
-		Clone:         failIfCalledClone(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
-	}
-	if !strings.Contains(stdout.String(), "git@github.com:octocat/octocat.git") {
-		t.Errorf("Stdout = %q, want the auto-clone prompt to have been shown", stdout.String())
-	}
-}
-
-// TestBootstrapConfig_UserConfirms_ClonesAndWritesConfig covers the happy
-// path: a confirmed auto-clone must write a config whose targetRepo is the
-// clone destination, with a fully-populated MachineIDPath (pinning the
-// bug where an earlier draft hand-built the returned Config and dropped
-// it), and that config must already be on disk, not just in memory.
-func TestBootstrapConfig_UserConfirms_ClonesAndWritesConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	path := filepath.Join(t.TempDir(), "config.json")
-
-	var clonedURL, clonedDest string
-	cfg, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:    path,
-		Interactive:   true,
-		Stdin:         strings.NewReader("y\n"),
-		Stdout:        &bytes.Buffer{},
-		CloneProtocol: cloneProtocolSSH,
-		GitUserName:   func(ctx context.Context) string { return "octocat" },
-		Clone: func(ctx context.Context, url, dest string) error {
-			clonedURL, clonedDest = url, dest
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("bootstrapConfig() error = %v, want nil", err)
-	}
-
-	wantDest := filepath.Join(home, ".token-profile", "repos", "octocat")
-	if clonedURL != "git@github.com:octocat/octocat.git" {
-		t.Errorf("Clone was called with url = %q, want %q", clonedURL, "git@github.com:octocat/octocat.git")
-	}
-	if clonedDest != wantDest {
-		t.Errorf("Clone was called with dest = %q, want %q", clonedDest, wantDest)
-	}
-	if cfg.TargetRepo != wantDest {
-		t.Errorf("TargetRepo = %q, want %q", cfg.TargetRepo, wantDest)
-	}
-	if cfg.MachineIDPath == "" {
-		t.Error("MachineIDPath is empty, want it populated (bootstrapConfig must reload via config.Load, not hand-build a Config)")
-	}
-
-	onDisk, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v, want nil", err)
-	}
-	if onDisk != cfg {
-		t.Errorf("config.Load(path) = %+v, want it to match the returned config %+v (WriteTemplate must have actually landed on disk)", onDisk, cfg)
-	}
-}
-
-// TestBootstrapConfig_CloneFails_FallsBackAndReports covers a clone
-// failure (bad guess, no access, network error): the shortcut must fall
-// back to the plain scaffold, after reporting the failure.
-func TestBootstrapConfig_CloneFails_FallsBackAndReports(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	var stdout bytes.Buffer
-
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:    path,
-		Interactive:   true,
-		Stdin:         strings.NewReader("y\n"),
-		Stdout:        &stdout,
-		CloneProtocol: cloneProtocolSSH,
-		GitUserName:   func(ctx context.Context) string { return "octocat" },
-		Clone: func(ctx context.Context, url, dest string) error {
-			return errors.New("clone failed: repository not found")
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "created a starter config") {
-		t.Errorf("bootstrapConfig() error = %v, want the scaffold-and-guide error", err)
-	}
-	if !strings.Contains(stdout.String(), "auto-clone failed") {
-		t.Errorf("Stdout = %q, want it to report the clone failure", stdout.String())
-	}
-}
-
-// TestBootstrapConfig_InvalidCloneProtocol_ErrorsBeforePrompting covers an
-// invalid --clone-protocol value: it must error immediately, before the
-// prompt is ever shown (Stdout untouched) or Clone is invoked.
-func TestBootstrapConfig_InvalidCloneProtocol_ErrorsBeforePrompting(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	var stdout bytes.Buffer
-
-	_, err := bootstrapConfig(t.Context(), bootstrapDeps{
-		ConfigPath:    path,
-		Interactive:   true,
-		Stdin:         strings.NewReader("y\n"),
-		Stdout:        &stdout,
-		CloneProtocol: "bogus",
-		GitUserName:   func(ctx context.Context) string { return "octocat" },
-		Clone:         failIfCalledClone(t),
 	})
 	if err == nil {
-		t.Fatal("bootstrapConfig() error = nil, want an error for an invalid --clone-protocol")
+		t.Fatal("resolveInitConfig() error = nil, want a fail-fast error")
 	}
-	if !strings.Contains(err.Error(), "bogus") {
-		t.Errorf("bootstrapConfig() error = %q, want it to mention the invalid protocol", err.Error())
+	if !strings.Contains(err.Error(), configPath) {
+		t.Errorf("resolveInitConfig() error = %q, want it to mention the config path %q", err.Error(), configPath)
 	}
-	if stdout.String() != "" {
-		t.Errorf("Stdout = %q, want empty (prompt must never show before protocol validation)", stdout.String())
+	if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(config) error = %v, want os.ErrNotExist (nothing written)", statErr)
+	}
+}
+
+// TestResolveInitConfig_WizardCancelled_NoConfigWrittenNoCloneAttempted
+// covers the edge case: declining the wizard's trailing confirm must leave
+// no partial config on disk and never attempt a clone.
+func TestResolveInitConfig_WizardCancelled_NoConfigWrittenNoCloneAttempted(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cloneDest := filepath.Join(dir, "clone-dest")
+
+	_, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
+		Interactive: true,
+		Wizard: WizardDeps{
+			GitUserName: func(context.Context) string { return "octocat" },
+			Accessible:  true,
+			Input:       scriptedInput("octocat", "1", cloneDest, "n"),
+			Output:      &bytes.Buffer{},
+		},
+		ResolveCloneURL: func(config.CloneProtocol, string) (string, error) {
+			t.Fatal("ResolveCloneURL was called, want it untouched when the wizard is cancelled")
+			return "", nil
+		},
+	})
+	if !errors.Is(err, ErrWizardCancelled) {
+		t.Errorf("resolveInitConfig() error = %v, want ErrWizardCancelled", err)
+	}
+	if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(config) error = %v, want os.ErrNotExist (nothing written after a cancelled wizard)", statErr)
+	}
+	if _, statErr := os.Stat(cloneDest); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(clone dest) error = %v, want os.ErrNotExist (no clone side effects after a cancelled wizard)", statErr)
+	}
+}
+
+// TestResolveInitConfig_FreshMachine_WizardConfirmed_ClonesAndWritesConfig
+// covers the wizard-confirmed happy path end to end: real local git
+// fixtures stand in for the remote (matching this repo's no-mocked-git
+// convention), with ResolveCloneURL substituting the fixture's URL for the
+// real github.com one profileRepoURL would otherwise construct.
+func TestResolveInitConfig_FreshMachine_WizardConfirmed_ClonesAndWritesConfig(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	localPath := filepath.Join(home, "clone")
+
+	var stdout bytes.Buffer
+	cfg, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
+		Interactive: true,
+		Wizard: WizardDeps{
+			GitUserName: func(context.Context) string { return "" },
+			Accessible:  true,
+			Input:       scriptedInput("octocat", "1", localPath, "y"),
+			Output:      &bytes.Buffer{},
+		},
+		Stdout: &stdout,
+		ResolveCloneURL: func(protocol config.CloneProtocol, repoName string) (string, error) {
+			if repoName != "octocat" {
+				t.Errorf("ResolveCloneURL called with repoName = %q, want %q", repoName, "octocat")
+			}
+			if protocol != config.CloneProtocolHTTPS {
+				t.Errorf("ResolveCloneURL called with protocol = %q, want %q", protocol, config.CloneProtocolHTTPS)
+			}
+			return remote, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveInitConfig() error = %v, want nil", err)
+	}
+
+	if cfg.TargetRepo != localPath {
+		t.Errorf("cfg.TargetRepo = %q, want %q", cfg.TargetRepo, localPath)
+	}
+	if cfg.RemoteRepo != remote {
+		t.Errorf("cfg.RemoteRepo = %q, want %q", cfg.RemoteRepo, remote)
+	}
+	if cfg.CloneProtocol != config.CloneProtocolHTTPS {
+		t.Errorf("cfg.CloneProtocol = %q, want %q", cfg.CloneProtocol, config.CloneProtocolHTTPS)
+	}
+
+	out := runGitT(t, localPath, "rev-parse", "--is-inside-work-tree")
+	if strings.TrimSpace(out) != "true" {
+		t.Errorf("localPath %s is not a git working tree after resolveInitConfig()", localPath)
+	}
+	if !strings.Contains(stdout.String(), "cloned") {
+		t.Errorf("Stdout = %q, want it to report the clone status", stdout.String())
+	}
+
+	onDisk, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load() error = %v, want nil", err)
+	}
+	if onDisk != cfg {
+		t.Errorf("config.Load(configPath) = %+v, want it to match the returned config %+v", onDisk, cfg)
+	}
+}
+
+// TestNewInitCmd_NoCloneProtocolFlag covers KTD14: the --clone-protocol
+// flag is obsoleted by the wizard's own protocol field and must no longer
+// be registered on `init`.
+func TestNewInitCmd_NoCloneProtocolFlag(t *testing.T) {
+	cmd := NewInitCmd()
+	if f := cmd.Flags().Lookup("clone-protocol"); f != nil {
+		t.Errorf("NewInitCmd() still registers a --clone-protocol flag = %+v, want it removed (KTD14)", f)
+	}
+}
+
+// TestGuidedInit_FreshMachine_EndToEnd_ClonesConfigsSchedulesAndPublishes is
+// the plan's headline happy-path scenario (F1) exercised end to end: the
+// wizard-driven config resolution feeds straight into Init, cloning the
+// repo, writing config, ensuring README markers, performing the first
+// publish, and — on accepting the schedule-registration offer — installing
+// the schedule. A second fresh clone of the remote proves the commit
+// actually landed, mirroring TestInit_EndToEnd_FreshRepo's own verification
+// style.
+func TestGuidedInit_FreshMachine_EndToEnd_ClonesConfigsSchedulesAndPublishes(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	localPath := filepath.Join(home, "clone")
+
+	cfg, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
+		Interactive: true,
+		Wizard: WizardDeps{
+			GitUserName: func(context.Context) string { return "" },
+			Accessible:  true,
+			Input:       scriptedInput("octocat", "1", localPath, "y"),
+			Output:      &bytes.Buffer{},
+		},
+		Stdout: &bytes.Buffer{},
+		ResolveCloneURL: func(config.CloneProtocol, string) (string, error) {
+			return remote, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveInitConfig() error = %v, want nil", err)
+	}
+
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+	schedDir := t.TempDir()
+	statePath := filepath.Join(schedDir, "state")
+	capturePath := filepath.Join(schedDir, "capture")
+	launchctlBin := fakeLaunchctlBinary(t, statePath, capturePath)
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         cfg,
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-guided",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        cfg.TargetRepo,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     configPath,
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(schedDir, "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(cfg.TargetRepo, readmeFile))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	if _, err := readme.Inject(readmeBytes, "probe"); err != nil {
+		t.Errorf("readme.Inject() after Init() error = %v, want nil (markers must be present)", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "guided-verify")
+	log := runGitT(t, verify, "log", "--oneline")
+	if !strings.Contains(log, "token-profile") {
+		t.Errorf("git log = %q, want the first run's commit to have landed on the remote", log)
+	}
+
+	captured := readCaptureFile(t, capturePath)
+	foundBootstrap := false
+	for _, line := range captured {
+		if strings.HasPrefix(line, "bootstrap ") {
+			foundBootstrap = true
+		}
+	}
+	if !foundBootstrap {
+		t.Errorf("captured launchctl invocations = %v, want a bootstrap call", captured)
 	}
 }

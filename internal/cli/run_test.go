@@ -797,6 +797,34 @@ func TestRun_EndToEnd_CardIsFencedAndCollapsible(t *testing.T) {
 	}
 }
 
+// TestRun_NoConfigNoTTY_FailsFastNothingWritten covers AE1/R5: `run`
+// invoked from an unattended scheduler (no TTY) against a machine with no
+// config file yet must exit non-zero with an actionable error naming the
+// missing config path and pointing at interactive `init`, without writing
+// any file. NewRunCmd's RunE delegates this exact check to
+// requireConfigOrTTY (init.go), which is what's exercised here — a real
+// cobra Execute() can't deterministically control the test process's own
+// os.Stdin TTY-ness, so requireConfigOrTTY is the testable seam for this
+// contract.
+func TestRun_NoConfigNoTTY_FailsFastNothingWritten(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	err := requireConfigOrTTY(configPath, false)
+	if err == nil {
+		t.Fatal("requireConfigOrTTY() error = nil, want the AE1/R5 fail-fast error")
+	}
+	if !strings.Contains(err.Error(), configPath) {
+		t.Errorf("error = %q, want it to name the missing config path %q", err.Error(), configPath)
+	}
+	if !strings.Contains(err.Error(), "init") {
+		t.Errorf("error = %q, want it to point at interactive `token-profile init`", err.Error())
+	}
+	if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(config) error = %v, want os.ErrNotExist (nothing written)", statErr)
+	}
+}
+
 // TestRun_ReadmeMissingMarkers_SurfacesErrMarkersMissing covers the error
 // path: a target repo whose README lacks the token-profile markers must
 // fail with an actionable error surfacing readme.ErrMarkersMissing, rather

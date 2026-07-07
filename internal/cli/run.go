@@ -413,6 +413,10 @@ func NewRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Resolve local usage, merge machine snapshots, and publish the refreshed profile card",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireConfigOrTTY(configPath, isInteractive(os.Stdin)); err != nil {
+				return err
+			}
+
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return fmt.Errorf("loading config %s: %w", configPath, err)

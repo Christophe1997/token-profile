@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -69,6 +70,21 @@ type InitDeps struct {
 	// gets this output through the same shared run() core, no separate
 	// implementation.
 	Stdout io.Writer
+	// Stdin is the post-init schedule-registration prompt's input source
+	// (R4) — read via confirmYesNo's bufio-scanner y/N pattern.
+	Stdin io.Reader
+	// PromptSchedule gates whether the schedule-registration prompt is
+	// shown at all. Resolved once by NewInitCmd via isInteractive(os.Stdin)
+	// rather than Init re-deriving it from Stdin's own concrete type, so
+	// tests can drive the prompt through a plain strings.Reader — isInteractive
+	// would otherwise always report false for such a fixture.
+	PromptSchedule bool
+	// Schedule carries the live schedule-registration's install-time
+	// parameters not already covered above: PlistPath (the real LaunchAgents
+	// location InstallSchedule targets, darwin only) plus Launchctl/Crontab
+	// overrides for tests. Label, BinaryPath, ConfigPath, and Interval are
+	// filled in by offerScheduleRegistration itself.
+	Schedule ScheduleDeps
 }
 
 // Init performs one-command setup (R10, R11, F3): it scaffolds the
@@ -105,18 +121,52 @@ func Init(ctx context.Context, deps InitDeps) error {
 		return fmt.Errorf("scaffolding README markers: %w", err)
 	}
 
-	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath); err != nil {
+	interval := cmp.Or(deps.Config.ScheduleInterval, config.DefaultScheduleInterval)
+	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath, interval); err != nil {
 		return fmt.Errorf("scaffolding scheduling entry: %w", err)
 	}
 
-	return run(ctx, RunDeps{
+	if err := run(ctx, RunDeps{
 		Config:    deps.Config,
 		Client:    deps.Client,
 		MachineID: deps.MachineID,
 		Now:       deps.Now,
 		RepoDir:   deps.RepoDir,
 		Stdout:    deps.Stdout,
-	})
+	}); err != nil {
+		return err
+	}
+
+	return offerScheduleRegistration(ctx, deps, interval)
+}
+
+// offerScheduleRegistration prompts (R4) whether to register the refresh
+// schedule after a successful init, installing it via InstallSchedule on
+// yes. A failed install attempt degrades to a warning rather than a
+// non-zero exit (KTD17): by this point clone, config, and the first publish
+// have already succeeded, so scheduling is best-effort auxiliary setup the
+// adopter can retry, or install manually from the already-written
+// --schedule-dest snippet.
+func offerScheduleRegistration(ctx context.Context, deps InitDeps, interval time.Duration) error {
+	if !deps.PromptSchedule {
+		return nil
+	}
+	if !confirmYesNo(deps.Stdin, deps.Stdout, "Register the refresh schedule now?") {
+		return nil
+	}
+
+	sched := deps.Schedule
+	sched.Label = launchdLabel
+	sched.BinaryPath = deps.BinaryPath
+	sched.ConfigPath = deps.ConfigPath
+	sched.Interval = interval
+
+	if _, err := InstallSchedule(ctx, sched); err != nil {
+		fmt.Fprintf(deps.Stdout,
+			"warning: failed to register the refresh schedule: %v (the snippet at %s is still available to install manually)\n",
+			err, deps.ScheduleDest)
+	}
+	return nil
 }
 
 // ensureReadmeMarkers idempotently scaffolds repoDir's README.md with the
@@ -157,11 +207,11 @@ func ensureReadmeMarkers(repoDir string) error {
 // dest, describing how to run `token-profile run` on a recurring schedule.
 // It overwrites dest deterministically on every call — rather than
 // appending — so re-running init never duplicates the entry.
-func ensureSchedulingEntry(dest, goos, binaryPath, configPath string) error {
+func ensureSchedulingEntry(dest, goos, binaryPath, configPath string, interval time.Duration) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("creating scheduling entry directory for %s: %w", dest, err)
 	}
-	content := schedulingEntryContent(goos, binaryPath, configPath)
+	content := schedulingEntryContent(goos, binaryPath, configPath, interval)
 	if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("writing scheduling entry %s: %w", dest, err)
 	}
@@ -169,11 +219,21 @@ func ensureSchedulingEntry(dest, goos, binaryPath, configPath string) error {
 }
 
 // schedulingEntryContent renders the scheduling snippet for goos: a launchd
-// plist on darwin, or a crontab-line snippet everywhere else. Taking goos as
-// a parameter (rather than reading runtime.GOOS internally) keeps this
-// function pure and testable across both branches regardless of which OS
-// the tests run on.
-func schedulingEntryContent(goos, binaryPath, configPath string) string {
+// plist on darwin, or a crontab-line snippet everywhere else, driven by the
+// configured refresh cadence (interval) rather than the old hardcoded
+// 6-hour cycle (KTD10 supersedes the previous 21600/"0 */6 * * *"
+// constants) — reuses schedule.go's own scheduleIntervalSeconds/
+// scheduleCronField so the live-install path (offerScheduleRegistration)
+// and this reviewable snippet can never drift apart. A zero interval — an
+// InitDeps literal built directly by a test, bypassing config.Load's
+// Default() layering — falls back to config.DefaultScheduleInterval,
+// mirroring resolveRenderMode's own zero-value-safe default (run.go). Taking
+// goos as a parameter (rather than reading runtime.GOOS internally) keeps
+// this function pure and testable across both branches regardless of which
+// OS the tests run on.
+func schedulingEntryContent(goos, binaryPath, configPath string, interval time.Duration) string {
+	interval = cmp.Or(interval, config.DefaultScheduleInterval)
+
 	if goos == "darwin" {
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -189,15 +249,15 @@ func schedulingEntryContent(goos, binaryPath, configPath string) string {
 		<string>%s</string>
 	</array>
 	<key>StartInterval</key>
-	<integer>21600</integer>
+	<integer>%d</integer>
 </dict>
 </plist>
-`, launchdLabel, binaryPath, configPath)
+`, launchdLabel, binaryPath, configPath, scheduleIntervalSeconds(interval))
 	}
 
 	return fmt.Sprintf(
-		"# token-profile: refresh usage profile every 6 hours\n0 */6 * * * %s run --config %s\n",
-		binaryPath, configPath,
+		"# token-profile: refresh usage profile every %d hours\n0 %s * * * %s run --config %s\n",
+		int(interval.Hours()), scheduleCronField(interval), binaryPath, configPath,
 	)
 }
 
@@ -215,53 +275,58 @@ func defaultScheduleDest() string {
 	return defaultStateFile(name)
 }
 
+// defaultLaunchdPlistPath returns where InstallSchedule/RemoveSchedule
+// write and target the live-registered launchd job's plist on darwin —
+// distinct from defaultScheduleDest's reviewable snippet path (KTD14): this
+// is the file launchctl bootstrap actually loads, following the standard
+// per-user LaunchAgents convention.
+func defaultLaunchdPlistPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+}
+
 // configFileExists reports whether a config file already sits at path,
 // treating any stat error other than "not exist" as "exists" —
-// loadOrScaffoldConfig and bootstrapConfig share this conservative rule, so
-// neither ever scaffolds over a file it merely couldn't read (e.g.
-// permission denied).
+// resolveInitConfig and requireConfigOrTTY share this conservative rule, so
+// neither ever re-triggers the wizard or scaffolds over a file it merely
+// couldn't read (e.g. permission denied).
 func configFileExists(path string) bool {
 	_, statErr := os.Stat(path)
 	return !errors.Is(statErr, os.ErrNotExist)
 }
 
-// loadOrScaffoldConfig loads the config file at configPath for `init`,
-// distinguishing "no config file exists yet" (first-time adopter) from "a
-// config file exists but targetRepo is simply blank" (mis-set config): only
-// the former scaffolds a starter template and returns a guided error; the
-// latter returns the loaded config as-is (with TargetRepo == ""), so the
-// caller's existing errTargetRepoMissing check applies unchanged.
-func loadOrScaffoldConfig(configPath string) (config.Config, error) {
-	configExists := configFileExists(configPath)
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return config.Config{}, err
-	}
-
-	if cfg.TargetRepo == "" && !configExists {
-		if err := config.WriteTemplate(configPath, config.TemplateFields{}); err != nil {
-			return config.Config{}, fmt.Errorf("scaffolding starter config: %w", err)
-		}
-		return config.Config{}, fmt.Errorf(
-			`created a starter config at %s — edit it to set "targetRepo", then re-run "token-profile init"`,
-			configPath,
-		)
-	}
-
-	return cfg, nil
+// errNoConfigNoTTY is R5/AE1's fail-fast error: a config-needing command
+// (`run`, or the guided-init entry point resolveInitConfig) invoked with no
+// config file yet and no interactive terminal to create one via the wizard
+// fails immediately, naming the missing path and pointing at interactive
+// `init` — never silently scaffolding a default config (R5).
+func errNoConfigNoTTY(configPath string) error {
+	return fmt.Errorf(
+		`no config file found at %s and no interactive terminal available — run "token-profile init" interactively to create one`,
+		configPath,
+	)
 }
 
-const (
-	cloneProtocolSSH   = "ssh"
-	cloneProtocolHTTPS = "https"
-)
+// requireConfigOrTTY is NewRunCmd's own R5/AE1 gate, factored out so it's
+// testable without depending on the real process's os.Stdin (whose
+// TTY-ness a plain `go test` run can't deterministically control) — mirrors
+// resolveInitConfig's identical fail-fast rule for the init path.
+func requireConfigOrTTY(configPath string, interactive bool) error {
+	if configFileExists(configPath) || interactive {
+		return nil
+	}
+	return errNoConfigNoTTY(configPath)
+}
 
-// isInteractive reports whether r is a real terminal — so the auto-clone
-// shortcut only offers itself at an interactive session, never during a
-// scheduled cron/launchd invocation (which has no TTY to prompt on). Only a
-// concrete *os.File character device counts; any other io.Reader (every
-// test fixture included) is non-interactive.
+// isInteractive reports whether r is a real terminal — so the guided setup
+// wizard and schedule-registration prompt only offer themselves at an
+// interactive session, never during a scheduled cron/launchd invocation
+// (which has no TTY to prompt on). Only a concrete *os.File character
+// device counts; any other io.Reader (every test fixture included) is
+// non-interactive.
 func isInteractive(r io.Reader) bool {
 	f, ok := r.(*os.File)
 	if !ok {
@@ -277,7 +342,8 @@ func isInteractive(r io.Reader) bool {
 // gitGlobalUserName resolves the operator's global git user.name — a guess
 // at their GitHub handle, per GitHub's own username/username profile-repo
 // convention (see README.md). Returns "" (not an error) if unset or git is
-// unavailable, since that just means the auto-clone shortcut doesn't apply.
+// unavailable, since that just means the wizard's pre-filled defaults stay
+// blank (see RunWizard).
 func gitGlobalUserName(ctx context.Context) string {
 	cmd := exec.CommandContext(ctx, "git", "config", "--global", "user.name")
 	var stdout bytes.Buffer
@@ -302,43 +368,31 @@ func validAutoCloneName(name string) bool {
 }
 
 // profileRepoURL constructs the guessed GitHub profile-repo URL for
-// name/name under protocol's scheme.
-func profileRepoURL(protocol, name string) (string, error) {
+// name/name under protocol's scheme (the username/username convention).
+func profileRepoURL(protocol config.CloneProtocol, name string) (string, error) {
 	switch protocol {
-	case cloneProtocolSSH:
+	case config.CloneProtocolSSH:
 		return fmt.Sprintf("git@github.com:%s/%s.git", name, name), nil
-	case cloneProtocolHTTPS:
+	case config.CloneProtocolHTTPS:
 		return fmt.Sprintf("https://github.com/%s/%s.git", name, name), nil
 	default:
-		return "", fmt.Errorf("invalid --clone-protocol %q (want %q or %q)", protocol, cloneProtocolSSH, cloneProtocolHTTPS)
+		return "", fmt.Errorf("invalid clone protocol %q (want %q or %q)", protocol, config.CloneProtocolHTTPS, config.CloneProtocolSSH)
 	}
 }
 
-// cloneProfileRepo clones url into dest via a plain `git clone`, creating
-// dest's parent directory first — mirroring ensureSchedulingEntry's own
-// os.MkdirAll-before-write convention — since ~/.token-profile/repos may
-// not exist yet on a machine running `init` for the first time.
-func cloneProfileRepo(ctx context.Context, url, dest string) error {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("creating clone destination directory for %s: %w", dest, err)
-	}
-	cmd := exec.CommandContext(ctx, "git", "clone", url, dest)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git clone %s %s: %w: %s", url, dest, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
-// confirmAutoClone prompts once via stdout/stdin, reading a single line of
+// confirmYesNo prompts once via stdout/stdin, reading a single line of
 // free-form confirmation. Any answer other than a case-insensitive "y" or
-// "yes" — including no input at all — is "no": auto-clone is an optional
-// shortcut that must never surprise the operator on an ambiguous read.
-// bufio.Scanner (rather than fmt.Fscanln) reads exactly one line regardless
-// of a trailing newline's presence, and never errors on an empty line.
-func confirmAutoClone(stdin io.Reader, stdout io.Writer, url, dest string) bool {
-	fmt.Fprintf(stdout, "No config found. Clone %s into %s and use it as your target repo? [y/N] ", url, dest)
+// "yes" — including no input at all, or a nil stdin — is "no": every prompt
+// this backs (the old auto-clone shortcut, now the post-init
+// schedule-registration offer) is optional and must never surprise the
+// operator on an ambiguous read. bufio.Scanner (rather than fmt.Fscanln)
+// reads exactly one line regardless of a trailing newline's presence, and
+// never errors on an empty line.
+func confirmYesNo(stdin io.Reader, stdout io.Writer, prompt string) bool {
+	fmt.Fprintf(stdout, "%s [y/N] ", prompt)
+	if stdin == nil {
+		return false
+	}
 	scanner := bufio.NewScanner(stdin)
 	if !scanner.Scan() {
 		return false
@@ -347,84 +401,107 @@ func confirmAutoClone(stdin io.Reader, stdout io.Writer, url, dest string) bool 
 	return answer == "y" || answer == "yes"
 }
 
-// bootstrapDeps bundles bootstrapConfig's dependencies as a struct, unlike
-// this file's plain-multi-arg helpers (loadOrScaffoldConfig,
-// ensureSchedulingEntry): at 7 heterogeneous fields — including two
-// same-shaped io values (Stdin/Stdout) and two func values
-// (GitUserName/Clone) — plain positional args would invite mixups, the same
-// rationale RunDeps/InitDeps document for themselves.
-type bootstrapDeps struct {
-	ConfigPath    string
-	Interactive   bool
-	Stdin         io.Reader
-	Stdout        io.Writer
-	CloneProtocol string
-	// GitUserName resolves the operator's git global user.name. Injected so
-	// tests don't depend on (or mutate) the real machine's global git
-	// config.
-	GitUserName func(ctx context.Context) string
-	// Clone clones url into dest. Injected so tests can exercise both the
-	// success and failure paths without a real network call to github.com.
-	Clone func(ctx context.Context, url, dest string) error
+// initConfigDeps bundles resolveInitConfig's dependencies: whether a config
+// file already exists at ConfigPath decides everything else (R1) — Wizard,
+// Stdout, and ResolveCloneURL are only consulted on a fresh machine, where
+// no config file exists yet.
+type initConfigDeps struct {
+	// ConfigPath is where the resolved config is loaded from, or scaffolded
+	// to on a fresh machine.
+	ConfigPath string
+	// Interactive reports whether a real interactive terminal is present —
+	// resolved by the caller via isInteractive(os.Stdin), decoupling "is
+	// this session interactive" from Wizard.Input's own concrete type so
+	// tests can drive the wizard through a plain strings.Reader while still
+	// exercising the guided-setup path (isInteractive itself would always
+	// report false for such a fixture).
+	Interactive bool
+	// Wizard collects the three clone-related fields (R2) when no config
+	// file exists yet and Interactive is true.
+	Wizard WizardDeps
+	// Stdout receives the clone step's one-line status (KTD4) — cloned
+	// fresh, adopted existing, or (via the returned error) failed.
+	Stdout io.Writer
+	// ResolveCloneURL constructs the remote URL to clone from the wizard's
+	// chosen protocol/repo name. Defaults to profileRepoURL (the real
+	// GitHub username/username convention) when nil; tests override it to
+	// target a local bare-repo fixture instead of a real network call,
+	// matching this repo's real-git-fixture testing convention.
+	ResolveCloneURL func(protocol config.CloneProtocol, repoName string) (string, error)
 }
 
-// bootstrapConfig loads configPath for `init`, offering the interactive
-// auto-clone shortcut first when it applies: no config file exists yet,
-// deps.Interactive is true, and deps.GitUserName resolves to a path-safe
-// name. Any ineligible, declined, or failed step falls back to
-// loadOrScaffoldConfig's existing scaffold-and-guide behavior unchanged.
-func bootstrapConfig(ctx context.Context, deps bootstrapDeps) (config.Config, error) {
-	if !deps.Interactive || configFileExists(deps.ConfigPath) {
-		return loadOrScaffoldConfig(deps.ConfigPath)
+// resolveInitConfig resolves the config `init` should run with (R1, R3): an
+// already-existing config file is loaded as-is, the wizard never invoked
+// (AE6 — even a targetRepo that turns out to be missing or not a git
+// repository is Init's own requireGitWorkTree check to catch, not a reason
+// to re-run the wizard). Only a genuinely fresh machine (no config file
+// yet) triggers the guided wizard flow: collect the three fields, clone or
+// adopt the repo (U2), and write a full starter config (U1) before
+// reloading it. No interactive terminal and no config file is R5/AE1's
+// fail-fast case — nothing is ever written silently.
+func resolveInitConfig(ctx context.Context, deps initConfigDeps) (config.Config, error) {
+	if configFileExists(deps.ConfigPath) {
+		return config.Load(deps.ConfigPath)
+	}
+	if !deps.Interactive {
+		return config.Config{}, errNoConfigNoTTY(deps.ConfigPath)
 	}
 
-	name := deps.GitUserName(ctx)
-	if !validAutoCloneName(name) {
-		return loadOrScaffoldConfig(deps.ConfigPath)
-	}
-
-	url, err := profileRepoURL(deps.CloneProtocol, name)
+	result, err := RunWizard(ctx, deps.Wizard)
 	if err != nil {
 		return config.Config{}, err
 	}
-	dest := defaultStateFile(filepath.Join("repos", name))
 
-	if !confirmAutoClone(deps.Stdin, deps.Stdout, url, dest) {
-		return loadOrScaffoldConfig(deps.ConfigPath)
+	resolveURL := deps.ResolveCloneURL
+	if resolveURL == nil {
+		resolveURL = profileRepoURL
+	}
+	url, err := resolveURL(result.CloneProtocol, result.RepoName)
+	if err != nil {
+		return config.Config{}, err
 	}
 
-	if err := deps.Clone(ctx, url, dest); err != nil {
-		fmt.Fprintf(deps.Stdout, "auto-clone failed (%v); falling back to a starter config template\n", err)
-		return loadOrScaffoldConfig(deps.ConfigPath)
+	status, err := cloneOrAdopt(ctx, url, result.LocalPath)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if deps.Stdout != nil {
+		fmt.Fprintln(deps.Stdout, status)
 	}
 
-	if err := config.WriteTemplate(deps.ConfigPath, config.TemplateFields{TargetRepo: dest}); err != nil {
-		return config.Config{}, fmt.Errorf("writing config after auto-clone: %w", err)
+	if err := config.WriteTemplate(deps.ConfigPath, config.TemplateFields{
+		TargetRepo:    result.LocalPath,
+		RemoteRepo:    url,
+		CloneProtocol: result.CloneProtocol,
+	}); err != nil {
+		return config.Config{}, fmt.Errorf("writing config after guided setup: %w", err)
 	}
+
 	return config.Load(deps.ConfigPath)
 }
 
 // NewInitCmd builds the `token-profile init` cobra command: a thin wrapper
-// that loads the real config file and this machine's cached identity, then
-// delegates the actual scaffolding-plus-first-run flow to Init. Mirrors
-// NewRunCmd's own wiring pattern.
+// that resolves the config (loading it as-is, or running the guided wizard
+// on a fresh machine — resolveInitConfig) and this machine's cached
+// identity, then delegates the actual scaffolding-plus-first-run flow to
+// Init. Mirrors NewRunCmd's own wiring pattern.
 func NewInitCmd() *cobra.Command {
 	var configPath string
 	var scheduleDest string
-	var cloneProtocol string
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Scaffold README markers and a scheduling entry, then perform the first run",
+		Short: "Guide first-time setup (clone, config, schedule), then perform the first run",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := bootstrapConfig(cmd.Context(), bootstrapDeps{
-				ConfigPath:    configPath,
-				Interactive:   isInteractive(os.Stdin),
-				Stdin:         os.Stdin,
-				Stdout:        cmd.OutOrStdout(),
-				CloneProtocol: cloneProtocol,
-				GitUserName:   gitGlobalUserName,
-				Clone:         cloneProfileRepo,
+			interactive := isInteractive(os.Stdin)
+
+			cfg, err := resolveInitConfig(cmd.Context(), initConfigDeps{
+				ConfigPath:  configPath,
+				Interactive: interactive,
+				Wizard: WizardDeps{
+					GitUserName: gitGlobalUserName,
+				},
+				Stdout: cmd.OutOrStdout(),
 			})
 			if err != nil {
 				return err
@@ -444,15 +521,20 @@ func NewInitCmd() *cobra.Command {
 			}
 
 			deps := InitDeps{
-				Config:       cfg,
-				Client:       &agentsview.Client{},
-				MachineID:    machineID,
-				Now:          time.Now().UTC(),
-				RepoDir:      cfg.TargetRepo,
-				ScheduleDest: scheduleDest,
-				BinaryPath:   binaryPath,
-				ConfigPath:   configPath,
-				Stdout:       cmd.OutOrStdout(),
+				Config:         cfg,
+				Client:         &agentsview.Client{},
+				MachineID:      machineID,
+				Now:            time.Now().UTC(),
+				RepoDir:        cfg.TargetRepo,
+				ScheduleDest:   scheduleDest,
+				BinaryPath:     binaryPath,
+				ConfigPath:     configPath,
+				Stdout:         cmd.OutOrStdout(),
+				Stdin:          os.Stdin,
+				PromptSchedule: interactive,
+				Schedule: ScheduleDeps{
+					PlistPath: defaultLaunchdPlistPath(),
+				},
 			}
 			return Init(cmd.Context(), deps)
 		},
@@ -460,6 +542,5 @@ func NewInitCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPath(), "path to token-profile's config file")
 	cmd.Flags().StringVar(&scheduleDest, "schedule-dest", defaultScheduleDest(), "path to write the scheduling entry snippet")
-	cmd.Flags().StringVar(&cloneProtocol, "clone-protocol", cloneProtocolHTTPS, `protocol for the interactive auto-clone shortcut's git URL ("ssh" or "https")`)
 	return cmd
 }
