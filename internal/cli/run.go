@@ -82,6 +82,12 @@ type RunDeps struct {
 	// existing RunDeps literal that doesn't set it keeps behaving exactly
 	// as before.
 	Stdout io.Writer
+	// DryRun stops run before gitops.Publish's stage/commit/push (R7, R9):
+	// usage resolution, the snapshot write, the card render, and the README
+	// injection all still happen for real, leaving the working tree with
+	// real, inspectable changes — only the commit and push are skipped, in
+	// favor of a printed summary of what would have been committed.
+	DryRun bool
 }
 
 // Run executes the end-to-end refresh flow: resolve this machine's usage,
@@ -142,6 +148,10 @@ func run(ctx context.Context, deps RunDeps) error {
 	}
 	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
 
+	if deps.DryRun {
+		return printDryRunSummary(ctx, deps, files, commitMessage)
+	}
+
 	// regenerate lets gitops.Publish re-derive the README after a rebase
 	// pulls in another machine's newly-pushed snapshot: without it, a
 	// retried push would carry this machine's pre-rebase render, which
@@ -180,6 +190,50 @@ func writeSuccessSummary(ctx context.Context, deps RunDeps) {
 		return
 	}
 	fmt.Fprintf(deps.Stdout, "%s — published as %s\n", render.Headline(sum), commit)
+}
+
+// printDryRunSummary reports (R7's "printing a summary of what would have
+// been committed") which of files currently carry uncommitted working-tree
+// changes — exactly what a non-dry-run gitops.Publish would have staged and
+// committed under commitMessage — without ever invoking `git add`, `commit`,
+// or `push` (R9). A nil deps.Stdout still returns nil: the caller's contract
+// is "no error, no publish", not "print or fail".
+func printDryRunSummary(ctx context.Context, deps RunDeps, files []string, commitMessage string) error {
+	changed, err := changedPaths(ctx, deps.RepoDir, files)
+	if err != nil {
+		return fmt.Errorf("computing dry-run summary: %w", err)
+	}
+	if deps.Stdout == nil {
+		return nil
+	}
+	if len(changed) == 0 {
+		fmt.Fprintf(deps.Stdout, "dry run: nothing to publish — the working tree already matches commit %q, so it would have been a no-op\n", commitMessage)
+		return nil
+	}
+	fmt.Fprintf(deps.Stdout, "dry run: stopped before committing/pushing; would commit %q, containing:\n", commitMessage)
+	for _, line := range changed {
+		fmt.Fprintf(deps.Stdout, "  %s\n", line)
+	}
+	return nil
+}
+
+// changedPaths reports paths' working-tree status lines (`git status
+// --porcelain`) scoped to paths, mirroring cleanup.go's uncommittedPaths for
+// the same TTY-free, read-only status check.
+func changedPaths(ctx context.Context, repoDir string, paths []string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"status", "--porcelain", "--"}, paths...)...)
+	cmd.Dir = repoDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git status --porcelain: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	text := strings.TrimRight(stdout.String(), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	return strings.Split(text, "\n"), nil
 }
 
 // headCommit resolves repoDir's current HEAD as a short hash, mirroring
@@ -408,6 +462,7 @@ func sinceDate(now time.Time, window time.Duration) string {
 // tests without going through cobra command execution.
 func NewRunCmd() *cobra.Command {
 	var configPath string
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -437,12 +492,14 @@ func NewRunCmd() *cobra.Command {
 				Now:       time.Now().UTC(),
 				RepoDir:   cfg.TargetRepo,
 				Stdout:    cmd.OutOrStdout(),
+				DryRun:    dryRun,
 			}
 			return Run(cmd.Context(), deps)
 		},
 	}
 
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPath(), "path to token-profile's config file")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "perform every write but stop before committing/pushing, printing a summary instead")
 	return cmd
 }
 

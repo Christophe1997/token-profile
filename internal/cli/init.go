@@ -85,6 +85,12 @@ type InitDeps struct {
 	// overrides for tests. Label, BinaryPath, ConfigPath, and Interval are
 	// filled in by offerScheduleRegistration itself.
 	Schedule ScheduleDeps
+	// DryRun propagates into the RunDeps Init builds internally, stopping
+	// the first run before commit/push (R7-R9), and additionally skips the
+	// schedule-registration prompt (R4) entirely (R8, AE2) — registering a
+	// live schedule is exactly the kind of non-reversible step a dry run
+	// must never reach.
+	DryRun bool
 }
 
 // Init performs one-command setup (R10, R11, F3): it scaffolds the
@@ -133,8 +139,13 @@ func Init(ctx context.Context, deps InitDeps) error {
 		Now:       deps.Now,
 		RepoDir:   deps.RepoDir,
 		Stdout:    deps.Stdout,
+		DryRun:    deps.DryRun,
 	}); err != nil {
 		return err
+	}
+
+	if deps.DryRun {
+		return nil
 	}
 
 	return offerScheduleRegistration(ctx, deps, interval)
@@ -488,6 +499,7 @@ func resolveInitConfig(ctx context.Context, deps initConfigDeps) (config.Config,
 func NewInitCmd() *cobra.Command {
 	var configPath string
 	var scheduleDest string
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -535,6 +547,7 @@ func NewInitCmd() *cobra.Command {
 				Schedule: ScheduleDeps{
 					PlistPath: defaultLaunchdPlistPath(),
 				},
+				DryRun: dryRun,
 			}
 			return Init(cmd.Context(), deps)
 		},
@@ -542,5 +555,6 @@ func NewInitCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPath(), "path to token-profile's config file")
 	cmd.Flags().StringVar(&scheduleDest, "schedule-dest", defaultScheduleDest(), "path to write the scheduling entry snippet")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "perform every write (clone, config, README) but stop before committing/pushing, and skip the schedule-registration prompt")
 	return cmd
 }

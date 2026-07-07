@@ -935,3 +935,110 @@ func TestGuidedInit_FreshMachine_EndToEnd_ClonesConfigsSchedulesAndPublishes(t *
 		t.Errorf("captured launchctl invocations = %v, want a bootstrap call", captured)
 	}
 }
+
+// TestInit_DryRun_FreshMachine_ClonesConfigsWritesNoCommitNoSchedulePrompt
+// covers AE2/R8: a fresh-machine `init --dry-run` must still clone the
+// repo, write config, and ensure README markers on disk (the same real
+// writes as a non-dry-run init), but must never show the
+// schedule-registration prompt — even though PromptSchedule is true and
+// Stdin would answer "yes" — and must never commit/push.
+func TestInit_DryRun_FreshMachine_ClonesConfigsWritesNoCommitNoSchedulePrompt(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	localPath := filepath.Join(home, "clone")
+
+	cfg, err := resolveInitConfig(t.Context(), initConfigDeps{
+		ConfigPath:  configPath,
+		Interactive: true,
+		Wizard: WizardDeps{
+			GitUserName: func(context.Context) string { return "" },
+			Accessible:  true,
+			Input:       scriptedInput("octocat", "1", localPath, "y"),
+			Output:      &bytes.Buffer{},
+		},
+		Stdout: &bytes.Buffer{},
+		ResolveCloneURL: func(config.CloneProtocol, string) (string, error) {
+			return remote, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveInitConfig() error = %v, want nil", err)
+	}
+
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         cfg,
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-dry-init",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        cfg.TargetRepo,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     configPath,
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		DryRun:         true,
+		Schedule: ScheduleDeps{
+			// A deliberately-broken path: if InstallSchedule were ever
+			// invoked despite the dry-run gate, resolving this would fail
+			// loudly rather than silently succeeding.
+			Launchctl: filepath.Join(t.TempDir(), "no-such-launchctl"),
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	// Repo cloned to disk.
+	out := runGitT(t, cfg.TargetRepo, "rev-parse", "--is-inside-work-tree")
+	if strings.TrimSpace(out) != "true" {
+		t.Errorf("localPath %s is not a git working tree after Init(), want it cloned", cfg.TargetRepo)
+	}
+
+	// Config written to disk.
+	if _, err := os.Stat(configPath); err != nil {
+		t.Errorf("Stat(config) error = %v, want the config written to disk", err)
+	}
+
+	// README markers ensured.
+	readmeBytes, err := os.ReadFile(filepath.Join(cfg.TargetRepo, readmeFile))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	if _, err := readme.Inject(readmeBytes, "probe"); err != nil {
+		t.Errorf("readme.Inject() after Init() error = %v, want nil (markers must be present)", err)
+	}
+
+	// The schedule-registration prompt must never be shown, and no install
+	// ever attempted, regardless of PromptSchedule/Stdin.
+	if strings.Contains(stdout.String(), "Register the refresh schedule now?") {
+		t.Errorf("Init() Stdout = %q, want the schedule-registration prompt never shown in dry-run mode", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "warning") {
+		t.Errorf("Init() Stdout = %q, want no schedule-install warning either, since the prompt was never shown", stdout.String())
+	}
+
+	// No commit/push landed on the remote.
+	verify2 := cloneWorkdir(t, remote, "dry-run-init-verify")
+	log2 := runGitT(t, verify2, "log", "--oneline")
+	if strings.Contains(log2, "token-profile") {
+		t.Errorf("git log = %q, want no commit landed on the remote in dry-run mode", log2)
+	}
+}
+
+// TestNewInitCmd_HasDryRunFlag covers R8: `init` must expose a --dry-run
+// flag.
+func TestNewInitCmd_HasDryRunFlag(t *testing.T) {
+	cmd := NewInitCmd()
+	if f := cmd.Flags().Lookup("dry-run"); f == nil {
+		t.Error("NewInitCmd() does not register a --dry-run flag, want one (R8)")
+	}
+}
