@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +27,10 @@ import (
 var errCleanupRequiresTTY = errors.New(
 	"cleanup requires an interactive terminal to confirm; rerun it from a real terminal session (no non-interactive override is available)",
 )
+
+// tokenProfileDir is the target repo's token-profile working directory,
+// relative to RepoDir.
+const tokenProfileDir = ".token-profile"
 
 // CleanupDeps bundles Cleanup's dependencies (F4) as a struct, mirroring
 // InitDeps/WizardDeps's own rationale: RepoDir/Schedule/Input/Output are
@@ -189,19 +192,17 @@ func Cleanup(ctx context.Context, deps CleanupDeps) (CleanupResult, error) {
 // removal attempt: RemoveSchedule's own return value collapses "was
 // registered, now removed" and "was already absent" into the same
 // ScheduleNotRegistered value (see its doc comment), which loses exactly
-// the removed-vs-nothing-to-remove distinction R11/AE3 require. The
-// live check is skipped a second time when nothing was found (mirroring
-// RemoveSchedule's own no-op-on-not-registered contract) to avoid a
-// redundant launchctl/crontab invocation.
+// the removed-vs-nothing-to-remove distinction R11/AE3 require. It calls
+// the package-private checkScheduleState/removeGivenState pair directly
+// (rather than the public CheckScheduleState+RemoveSchedule) so the live
+// state is resolved exactly once — RemoveSchedule would otherwise re-derive
+// state it already has, forcing a second launchctl/crontab round-trip.
 func deregisterSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	before, err := CheckScheduleState(ctx, deps)
+	before, cronContent, err := checkScheduleState(ctx, deps)
 	if err != nil {
 		return before, err
 	}
-	if before == ScheduleNotRegistered {
-		return before, nil
-	}
-	if _, err := RemoveSchedule(ctx, deps); err != nil {
+	if _, err := removeGivenState(ctx, deps, before, cronContent); err != nil {
 		return before, fmt.Errorf("removing schedule: %w", err)
 	}
 	return before, nil
@@ -230,7 +231,7 @@ func inspectFootprint(ctx context.Context, deps CleanupDeps, repoValid bool) (cl
 		footprint.readmeBytes = len(readmeBytes) - len(stripped)
 	}
 
-	fileCount, err := countFiles(filepath.Join(deps.RepoDir, ".token-profile"))
+	fileCount, err := countFiles(filepath.Join(deps.RepoDir, tokenProfileDir))
 	if err != nil {
 		return cleanupFootprint{}, fmt.Errorf("counting .token-profile files: %w", err)
 	}
@@ -274,26 +275,18 @@ func countFiles(dir string) (int, error) {
 // line per change. An empty result means the working tree is clean for
 // those paths.
 func uncommittedPaths(ctx context.Context, repoDir string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--", readmeFile, ".token-profile")
-	cmd.Dir = repoDir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git status --porcelain: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	text := strings.TrimRight(stdout.String(), "\n")
-	if text == "" {
-		return nil, nil
-	}
-	return strings.Split(text, "\n"), nil
+	return gitPorcelainStatus(ctx, repoDir, []string{readmeFile, tokenProfileDir})
 }
 
 // confirmCleanup prints footprint (KTD5's approach: everything that will be
-// touched, printed before the prompt) then shows a single huh.Confirm field,
-// reusing the wizard's cancellation contract (KTD2, U3): huh's accessible
-// mode never surfaces huh.ErrUserAborted, so an interrupted/aborted confirm
-// and a declined confirm both read as the field's zero value, false — both
+// touched, printed before the prompt) then shows a single huh.Confirm field
+// — a huh field rather than confirmYesNo's plain bufio.Scanner y/N reader,
+// so a destructive command gets the same accessible-mode TTY-free testing
+// story and the same trailing-confirm cancellation contract as the wizard,
+// instead of a second, differently-tested prompt mechanism — reusing the
+// wizard's cancellation contract (KTD2, U3): huh's accessible mode never
+// surfaces huh.ErrUserAborted, so an interrupted/aborted confirm and a
+// declined confirm both read as the field's zero value, false — both
 // treated identically as "declined" here. The huh.ErrUserAborted check
 // below remains as a production-only safeguard for a real interactive
 // ctrl+c, not exercised by this package's accessible-mode tests, matching
@@ -312,14 +305,8 @@ func confirmCleanup(deps CleanupDeps, footprint cleanupFootprint) (bool, error) 
 				Title("Proceed with cleanup?").
 				Value(&confirmed),
 		),
-	).WithAccessible(deps.Accessible)
-
-	if deps.Input != nil {
-		form = form.WithInput(deps.Input)
-	}
-	if deps.Output != nil {
-		form = form.WithOutput(deps.Output)
-	}
+	)
+	form = wireFormIO(form, deps.Accessible, deps.Input, deps.Output)
 
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -362,7 +349,7 @@ func stripReadmeFile(repoDir string) (bool, error) {
 // re-run against an already-deleted directory reports false rather than an
 // error.
 func removeTokenProfileDir(repoDir string) (bool, error) {
-	path := filepath.Join(repoDir, ".token-profile")
+	path := filepath.Join(repoDir, tokenProfileDir)
 	info, statErr := os.Stat(path)
 	existed := statErr == nil && info.IsDir()
 	if err := os.RemoveAll(path); err != nil {

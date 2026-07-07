@@ -108,16 +108,28 @@ func cronMarker(label string) string {
 	return "# token-profile:" + label
 }
 
+// checkScheduleState resolves live registration state and, for the cron
+// mechanism, returns the crontab content already fetched to determine it —
+// letting install/remove reuse that content instead of invoking `crontab -l`
+// a second time. The darwin mechanism has no equivalent content to reuse
+// (checkLaunchd's launchctl print is the single source of truth), so its
+// content return is always empty.
+func checkScheduleState(ctx context.Context, deps ScheduleDeps) (ScheduleState, string, error) {
+	if deps.goos() == "darwin" {
+		state, err := checkLaunchd(ctx, deps)
+		return state, "", err
+	}
+	return checkCronState(ctx, deps)
+}
+
 // CheckScheduleState resolves the live registration state of the scheduled
 // run: registered, not registered, or check failed (KTD7) — the last one
 // distinct from "not registered" so a real failure (e.g. launchd
 // unreachable, crontab misconfigured) is never silently treated as
 // "nothing to remove"/"safe to install" (AE4).
 func CheckScheduleState(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	if deps.goos() == "darwin" {
-		return checkLaunchd(ctx, deps)
-	}
-	return checkCron(ctx, deps)
+	state, _, err := checkScheduleState(ctx, deps)
+	return state, err
 }
 
 // InstallSchedule idempotently registers the scheduled run: a state check
@@ -126,7 +138,7 @@ func CheckScheduleState(ctx context.Context, deps ScheduleDeps) (ScheduleState, 
 // loaded" error. A failed state check is propagated rather than risking a
 // blind install against unknown live state.
 func InstallSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	state, err := CheckScheduleState(ctx, deps)
+	state, content, err := checkScheduleState(ctx, deps)
 	if err != nil {
 		return state, err
 	}
@@ -136,7 +148,7 @@ func InstallSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, err
 	if deps.goos() == "darwin" {
 		return installLaunchd(ctx, deps)
 	}
-	return installCron(ctx, deps)
+	return installCron(ctx, deps, content)
 }
 
 // RemoveSchedule idempotently deregisters the scheduled run: a state check
@@ -146,17 +158,26 @@ func InstallSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, err
 // propagated rather than risking a blind removal against unknown live
 // state.
 func RemoveSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	state, err := CheckScheduleState(ctx, deps)
+	state, content, err := checkScheduleState(ctx, deps)
 	if err != nil {
 		return state, err
 	}
+	return removeGivenState(ctx, deps, state, content)
+}
+
+// removeGivenState performs the removal implied by a state (and, for the
+// cron path, crontab content) the caller already resolved — shared by
+// RemoveSchedule and cleanup.go's deregisterSchedule so a caller that
+// already knows the live state doesn't force a second launchctl/crontab
+// round-trip just to re-derive what it already has.
+func removeGivenState(ctx context.Context, deps ScheduleDeps, state ScheduleState, cronContent string) (ScheduleState, error) {
 	if state == ScheduleNotRegistered {
 		return state, nil
 	}
 	if deps.goos() == "darwin" {
 		return removeLaunchd(ctx, deps)
 	}
-	return removeCron(ctx, deps)
+	return removeCron(ctx, deps, cronContent)
 }
 
 // launchctlPath resolves deps.Launchctl (or "launchctl") via exec.LookPath
@@ -286,15 +307,18 @@ func currentCrontab(ctx context.Context, deps ScheduleDeps) (string, error) {
 	return stdout.String(), nil
 }
 
-func checkCron(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
+// checkCronState resolves cron's live registration state and returns the
+// crontab content fetched to do so, so a caller that goes on to install or
+// remove an entry can reuse it instead of running `crontab -l` again.
+func checkCronState(ctx context.Context, deps ScheduleDeps) (ScheduleState, string, error) {
 	content, err := currentCrontab(ctx, deps)
 	if err != nil {
-		return ScheduleCheckFailed, err
+		return ScheduleCheckFailed, "", err
 	}
 	if strings.Contains(content, cronMarker(deps.Label)) {
-		return ScheduleRegistered, nil
+		return ScheduleRegistered, content, nil
 	}
-	return ScheduleNotRegistered, nil
+	return ScheduleNotRegistered, content, nil
 }
 
 // writeCrontab replaces the invoking user's entire crontab with content
@@ -316,13 +340,20 @@ func writeCrontab(ctx context.Context, deps ScheduleDeps, content string) error 
 	return nil
 }
 
+// cronJobLine renders the crontab line invoking token-profile run on
+// interval's cadence — shared by appendCronEntry (the managed, marker-paired
+// live entry) and init.go's schedulingEntryContent (the reviewable snippet),
+// so the two can never drift on the actual schedule expression.
+func cronJobLine(interval time.Duration, binaryPath, configPath string) string {
+	return fmt.Sprintf("0 %s * * * %s run --config %s", scheduleCronField(interval), binaryPath, configPath)
+}
+
 // appendCronEntry appends the managed marker-plus-job-line pair to
 // existing, preserving every pre-existing entry untouched and normalizing
 // to exactly one trailing newline regardless of existing's own trailing
 // newline count.
 func appendCronEntry(existing string, deps ScheduleDeps) string {
-	entry := fmt.Sprintf("%s\n0 %s * * * %s run --config %s",
-		cronMarker(deps.Label), scheduleCronField(deps.Interval), deps.BinaryPath, deps.ConfigPath)
+	entry := cronMarker(deps.Label) + "\n" + cronJobLine(deps.Interval, deps.BinaryPath, deps.ConfigPath)
 	if existing == "" {
 		return entry + "\n"
 	}
@@ -346,22 +377,18 @@ func stripCronEntry(existing, label string) string {
 	return strings.Join(kept, "\n")
 }
 
-func installCron(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	existing, err := currentCrontab(ctx, deps)
-	if err != nil {
-		return ScheduleNotRegistered, err
-	}
+// installCron takes existing (the crontab content the caller already
+// fetched via checkCronState) rather than re-fetching it.
+func installCron(ctx context.Context, deps ScheduleDeps, existing string) (ScheduleState, error) {
 	if err := writeCrontab(ctx, deps, appendCronEntry(existing, deps)); err != nil {
 		return ScheduleNotRegistered, err
 	}
 	return ScheduleRegistered, nil
 }
 
-func removeCron(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
-	existing, err := currentCrontab(ctx, deps)
-	if err != nil {
-		return ScheduleRegistered, err
-	}
+// removeCron takes existing (the crontab content the caller already
+// fetched via checkCronState) rather than re-fetching it.
+func removeCron(ctx context.Context, deps ScheduleDeps, existing string) (ScheduleState, error) {
 	if err := writeCrontab(ctx, deps, stripCronEntry(existing, deps.Label)); err != nil {
 		return ScheduleRegistered, err
 	}

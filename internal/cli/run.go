@@ -199,7 +199,7 @@ func writeSuccessSummary(ctx context.Context, deps RunDeps) {
 // or `push` (R9). A nil deps.Stdout still returns nil: the caller's contract
 // is "no error, no publish", not "print or fail".
 func printDryRunSummary(ctx context.Context, deps RunDeps, files []string, commitMessage string) error {
-	changed, err := changedPaths(ctx, deps.RepoDir, files)
+	changed, err := gitPorcelainStatus(ctx, deps.RepoDir, files)
 	if err != nil {
 		return fmt.Errorf("computing dry-run summary: %w", err)
 	}
@@ -217,10 +217,10 @@ func printDryRunSummary(ctx context.Context, deps RunDeps, files []string, commi
 	return nil
 }
 
-// changedPaths reports paths' working-tree status lines (`git status
-// --porcelain`) scoped to paths, mirroring cleanup.go's uncommittedPaths for
-// the same TTY-free, read-only status check.
-func changedPaths(ctx context.Context, repoDir string, paths []string) ([]string, error) {
+// gitPorcelainStatus reports paths' working-tree status lines (`git status
+// --porcelain`) scoped to paths — a read-only, TTY-free check shared by
+// run.go's dry-run summary and cleanup.go's pre-confirmation footprint.
+func gitPorcelainStatus(ctx context.Context, repoDir string, paths []string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"status", "--porcelain", "--"}, paths...)...)
 	cmd.Dir = repoDir
 	var stdout, stderr bytes.Buffer

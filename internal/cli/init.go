@@ -233,42 +233,30 @@ func ensureSchedulingEntry(dest, goos, binaryPath, configPath string, interval t
 // plist on darwin, or a crontab-line snippet everywhere else, driven by the
 // configured refresh cadence (interval) rather than the old hardcoded
 // 6-hour cycle (KTD10 supersedes the previous 21600/"0 */6 * * *"
-// constants) — reuses schedule.go's own scheduleIntervalSeconds/
-// scheduleCronField so the live-install path (offerScheduleRegistration)
-// and this reviewable snippet can never drift apart. A zero interval — an
-// InitDeps literal built directly by a test, bypassing config.Load's
-// Default() layering — falls back to config.DefaultScheduleInterval,
-// mirroring resolveRenderMode's own zero-value-safe default (run.go). Taking
-// goos as a parameter (rather than reading runtime.GOOS internally) keeps
-// this function pure and testable across both branches regardless of which
-// OS the tests run on.
+// constants). The darwin branch delegates to schedule.go's own launchdPlist
+// so the live-install path (offerScheduleRegistration) and this reviewable
+// snippet render from one template and can never drift apart. A zero
+// interval — an InitDeps literal built directly by a test, bypassing
+// config.Load's Default() layering — falls back to
+// config.DefaultScheduleInterval, mirroring resolveRenderMode's own
+// zero-value-safe default (run.go). Taking goos as a parameter (rather than
+// reading runtime.GOOS internally) keeps this function pure and testable
+// across both branches regardless of which OS the tests run on.
 func schedulingEntryContent(goos, binaryPath, configPath string, interval time.Duration) string {
 	interval = cmp.Or(interval, config.DefaultScheduleInterval)
 
 	if goos == "darwin" {
-		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>%s</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>%s</string>
-		<string>run</string>
-		<string>--config</string>
-		<string>%s</string>
-	</array>
-	<key>StartInterval</key>
-	<integer>%d</integer>
-</dict>
-</plist>
-`, launchdLabel, binaryPath, configPath, scheduleIntervalSeconds(interval))
+		return launchdPlist(ScheduleDeps{
+			Label:      launchdLabel,
+			BinaryPath: binaryPath,
+			ConfigPath: configPath,
+			Interval:   interval,
+		})
 	}
 
 	return fmt.Sprintf(
-		"# token-profile: refresh usage profile every %d hours\n0 %s * * * %s run --config %s\n",
-		int(interval.Hours()), scheduleCronField(interval), binaryPath, configPath,
+		"# token-profile: refresh usage profile every %d hours\n%s\n",
+		int(interval.Hours()), cronJobLine(interval, binaryPath, configPath),
 	)
 }
 

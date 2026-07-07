@@ -25,6 +25,21 @@ var ErrWizardCancelled = errors.New("setup wizard cancelled")
 // hyphen, no leading/trailing hyphen, 1-39 characters.
 var githubUsernameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
 
+// wireFormIO applies accessible/input/output onto form — the
+// WithAccessible/WithInput/WithOutput boilerplate shared by RunWizard and
+// cleanup.go's confirmCleanup. Nil input/output are left as huh's own
+// defaults (the real terminal), matching both callers' doc comments.
+func wireFormIO(form *huh.Form, accessible bool, input io.Reader, output io.Writer) *huh.Form {
+	form = form.WithAccessible(accessible)
+	if input != nil {
+		form = form.WithInput(input)
+	}
+	if output != nil {
+		form = form.WithOutput(output)
+	}
+	return form
+}
+
 // WizardResult is the three fields R2's setup wizard collects. A later unit
 // resolves these into an actual clone: RepoName and CloneProtocol build the
 // remote URL (via profileRepoURL), LocalPath is where it's cloned to.
@@ -126,14 +141,8 @@ func RunWizard(ctx context.Context, deps WizardDeps) (WizardResult, error) {
 				Title("Clone this repo and continue?").
 				Value(&confirmed),
 		),
-	).WithAccessible(deps.Accessible)
-
-	if deps.Input != nil {
-		form = form.WithInput(deps.Input)
-	}
-	if deps.Output != nil {
-		form = form.WithOutput(deps.Output)
-	}
+	)
+	form = wireFormIO(form, deps.Accessible, deps.Input, deps.Output)
 
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
