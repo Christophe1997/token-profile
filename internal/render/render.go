@@ -1,7 +1,7 @@
 // Package render composes a merged snapshot, its computed summary, and a
-// breakdown mode into the single bordered ASCII dashboard card (R8): a
-// title, headline summary, an asciigraph trend line, a streak indicator,
-// and a usage breakdown, in that order.
+// breakdown mode into the dashboard card, either as a bordered ASCII block
+// (Render, R8) or a light/dark SVG image (RenderSVG) — same title, headline
+// summary, trend, streak, and breakdown, in that order.
 package render
 
 import (
