@@ -107,17 +107,21 @@ type svgTextLine struct {
 }
 
 // svgTrend is the trend chart's data, pre-scaled to the fixed plot
-// rectangle (svgPlotTop/Bottom/Left/Right). Single covers the degenerate
-// one-data-point case, mirroring trendLines' own single-day branch: a
-// meaningful point/label instead of a one-point polyline.
+// rectangle (svgPlotTop/Bottom/Left/Right). NoData covers a user with real
+// history but nothing in the current trailing window (distinct from
+// svgCardData.NoData, which covers no history at all); Single covers the
+// degenerate one-data-point case, mirroring trendLines' own single-day
+// branch: a meaningful point/label instead of a one-point polyline.
 type svgTrend struct {
-	Single     bool
-	PointText  string
-	Polyline   string
-	StartLabel string
-	EndLabel   string
-	MaxLabel   string
-	MinLabel   string
+	NoData        bool
+	NoDataMessage string
+	Single        bool
+	PointText     string
+	Polyline      string
+	StartLabel    string
+	EndLabel      string
+	MaxLabel      string
+	MinLabel      string
 }
 
 // svgCardData is the template's root data. One value serves both palette
@@ -134,6 +138,8 @@ type svgCardData struct {
 	// buildSVGTrend's scaled polyline without repeating the literals.
 	PlotLeft, PlotRight, PlotBottom int
 
+	// NoData covers a brand-new adopter: no history at all, merged or
+	// otherwise. Hides Stats/Streak/Trend/Breakdown behind one message.
 	NoData        bool
 	NoDataMessage string
 
@@ -142,8 +148,12 @@ type svgCardData struct {
 	BreakdownHeading string
 	BreakdownRows    []svgBreakdownRow
 	OmittedLine      *svgTextLine
-	Trend            svgTrend
-	LastUpdated      string
+	// BreakdownNoDataMessage, when non-empty, replaces BreakdownRows and
+	// OmittedLine — set when real history exists but the current window has
+	// none, alongside Trend.NoData (see buildSVGCardData).
+	BreakdownNoDataMessage string
+	Trend                  svgTrend
+	LastUpdated            string
 }
 
 // xmlEscape escapes s for safe embedding as SVG text content. text/template
@@ -179,7 +189,9 @@ const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Wid
 {{end}}
 <text x="32" y="152" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">TREND</text>
 <line x1="{{.PlotLeft}}" y1="{{.PlotBottom}}" x2="{{.PlotRight}}" y2="{{.PlotBottom}}" stroke="{{.Palette.Grid}}" stroke-width="1"/>
-{{if .Trend.Single}}
+{{if .Trend.NoData}}
+<text x="349" y="228" font-size="13" fill="{{.Palette.Muted}}" text-anchor="middle">{{esc .Trend.NoDataMessage}}</text>
+{{else if .Trend.Single}}
 <circle cx="349" cy="228" r="5" fill="{{.Palette.Accent}}"/>
 <text x="349" y="208" font-size="13" fill="{{.Palette.Text}}" text-anchor="middle">{{esc .Trend.PointText}}</text>
 {{else}}
@@ -191,6 +203,9 @@ const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Wid
 {{end}}
 <text x="32" y="328" font-size="16" font-weight="600" fill="{{.Palette.Text}}">{{esc .Streak}}</text>
 <text x="32" y="360" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">{{esc .BreakdownHeading}}</text>
+{{if .BreakdownNoDataMessage}}
+<text x="32" y="384" font-size="13" fill="{{.Palette.Muted}}">{{esc .BreakdownNoDataMessage}}</text>
+{{else}}
 {{range .BreakdownRows}}
 <text x="32" y="{{.Y}}" font-size="13" fill="{{$.Palette.Text}}">{{esc .Label}}</text>
 <text x="420" y="{{.Y}}" font-size="13" fill="{{$.Palette.Muted}}" text-anchor="end">{{esc .Tokens}}</text>
@@ -198,6 +213,7 @@ const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Wid
 {{end}}
 {{with .OmittedLine}}
 <text x="32" y="{{.Y}}" font-size="13" fill="{{$.Palette.Muted}}">{{esc .Text}}</text>
+{{end}}
 {{end}}
 {{end}}
 <text x="32" y="504" font-size="11" fill="{{.Palette.Muted}}">{{esc .LastUpdated}}</text>
@@ -218,15 +234,26 @@ var svgTemplate = template.Must(template.New("dashboard-card").Funcs(template.Fu
 	},
 }).Parse(svgTemplateSource))
 
+// noWindowDataMessage covers a user with real merged history but zero rows
+// in the current trailing window (e.g. inactive for longer than the
+// window) — distinct from noDataMessage, which implies a brand-new
+// adopter. Reusing noDataMessage for this case would misrepresent existing
+// history as a first-run state.
+const noWindowDataMessage = "No usage in this window."
+
 // RenderSVG composes ds, sum, and mode into light and dark SVG variants of
 // the dashboard card (R1, R4): the same title/stat-duration, headline
 // stats with deltas, trend chart, streak, and breakdown truncation Render
 // already shows (R3) — reusing this package's own grouping/formatting
 // helpers directly (KTD4) — laid out on one fixed-size canvas per theme
 // rather than Render's auto-sizing box (see the package-level layout
-// constants).
-func RenderSVG(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) (light, dark string, err error) {
-	data := buildSVGCardData(ds, sum, mode, breakdownLimit, renderedAt)
+// constants). hasHistory distinguishes a brand-new adopter (no rows in the
+// merged dataset at all, before window-filtering) from a returning user
+// whose current window (ds) happens to be empty — the latter still shows
+// real headline stats/streak, with only the trend/breakdown sections
+// substituting a window-scoped no-data message.
+func RenderSVG(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) (light, dark string, err error) {
+	data := buildSVGCardData(ds, hasHistory, sum, mode, breakdownLimit, renderedAt)
 
 	data.Palette = svgLightPalette
 	var lightBuf bytes.Buffer
@@ -244,18 +271,18 @@ func RenderSVG(ds snapshot.MergedDataset, sum summary.Summary, mode config.Break
 }
 
 // AltText renders ds/sum's headline stats as one plain-text sentence (R8),
-// consumed by a later unit's <img alt> attribute. An empty dataset
-// explicitly names the "no data yet" state (reusing noDataMessage) rather
-// than a misleadingly precise all-zero sentence like "Tokens: 0 Cost:
-// $0.00 Streak: 0 days".
-func AltText(ds snapshot.MergedDataset, sum summary.Summary) string {
-	if len(ds.Rows) == 0 {
+// consumed by a later unit's <img alt> attribute. hasHistory false (a
+// brand-new adopter, mirroring RenderSVG's own parameter) explicitly names
+// the "no data yet" state rather than a misleadingly precise all-zero
+// sentence like "Tokens: 0 Cost: $0.00 Streak: 0 days".
+func AltText(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary) string {
+	if !hasHistory {
 		return CardTitle + " — " + noDataMessage
 	}
 	return fmt.Sprintf("%s. %s. %s.", titleLine(ds), summaryLine(sum), streakLine(sum))
 }
 
-func buildSVGCardData(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) svgCardData {
+func buildSVGCardData(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) svgCardData {
 	data := svgCardData{
 		Width:       svgWidth,
 		Height:      svgHeight,
@@ -266,7 +293,7 @@ func buildSVGCardData(ds snapshot.MergedDataset, sum summary.Summary, mode confi
 		PlotBottom:  svgPlotBottom,
 	}
 
-	if len(ds.Rows) == 0 {
+	if !hasHistory {
 		data.NoData = true
 		data.NoDataMessage = noDataMessage
 		return data
@@ -286,6 +313,12 @@ func buildSVGCardData(ds snapshot.MergedDataset, sum summary.Summary, mode confi
 	}
 	data.Streak = streakLine(sum)
 	data.BreakdownHeading = breakdownHeading(mode)
+
+	if len(ds.Rows) == 0 {
+		data.Trend = svgTrend{NoData: true, NoDataMessage: noWindowDataMessage}
+		data.BreakdownNoDataMessage = noWindowDataMessage
+		return data
+	}
 	data.BreakdownRows, data.OmittedLine = buildSVGBreakdown(ds, mode, breakdownLimit)
 	data.Trend = buildSVGTrend(ds)
 	return data

@@ -24,7 +24,7 @@ func TestRenderSVG_HappyPath_ContainsAllCardBlocks(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 
-	light, dark, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, renderedAt)
+	light, dark, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, renderedAt)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -75,7 +75,7 @@ func TestRenderSVG_HappyPath_ShowsWindowOverWindowDeltas(t *testing.T) {
 	ds := fixtureDataset()
 	renderedAt := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, renderedAt)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, renderedAt)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRenderSVG_EmptyDataset_NoDataYetVariant(t *testing.T) {
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, dark, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, asOf)
+	light, dark, err := render.RenderSVG(ds, false, sum, config.BreakdownPerModel, -1, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -114,6 +114,42 @@ func TestRenderSVG_EmptyDataset_NoDataYetVariant(t *testing.T) {
 	}
 }
 
+// TestRenderSVG_InactiveWindowWithHistory_ShowsRealStatsNotNoDataYet covers
+// code review F3: a user with real merged history but zero rows in the
+// current trailing window (e.g. inactive for 30+ days) must see their real
+// headline stats/streak, not the brand-new "no data yet" state — hasHistory
+// (derived from the pre-window-filter merged dataset) distinguishes this
+// from TestRenderSVG_EmptyDataset_NoDataYetVariant's genuinely-new-adopter
+// case, even though ds itself (the current window) is empty in both.
+func TestRenderSVG_InactiveWindowWithHistory_ShowsRealStatsNotNoDataYet(t *testing.T) {
+	ds := snapshot.MergedDataset{} // current window: empty
+	sum := summary.Summary{TotalTokens: 2000, TotalCost: 3.0, Streak: 0}
+	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	light, dark, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, asOf)
+	if err != nil {
+		t.Fatalf("RenderSVG() error = %v", err)
+	}
+
+	for _, out := range []string{light, dark} {
+		if strings.Contains(out, "No data yet") {
+			t.Errorf("RenderSVG() shows the brand-new \"No data yet\" state despite hasHistory=true:\n%s", out)
+		}
+		if !strings.Contains(out, "2,000") {
+			t.Errorf("RenderSVG() missing real token total \"2,000\" from history outside the current window:\n%s", out)
+		}
+		if !strings.Contains(out, "$3.00") {
+			t.Errorf("RenderSVG() missing real cost total \"$3.00\":\n%s", out)
+		}
+		if strings.Contains(out, "polyline") {
+			t.Errorf("RenderSVG() unexpectedly contains a trend polyline for an empty current window:\n%s", out)
+		}
+		if !strings.Contains(out, "No usage in this window") {
+			t.Errorf("RenderSVG() missing a window-scoped (not brand-new) no-data message for the trend/breakdown sections:\n%s", out)
+		}
+	}
+}
+
 // TestRenderSVG_SingleDayDataset_DegenerateChartNoError covers a brand-new
 // adopter's first tracked day: exactly one distinct date must render a
 // degenerate (single-point) chart without erroring or panicking.
@@ -125,7 +161,7 @@ func TestRenderSVG_SingleDayDataset_DegenerateChartNoError(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
 
-	light, dark, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, renderedAt)
+	light, dark, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, renderedAt)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -152,7 +188,7 @@ func TestRenderSVG_BreakdownLimit_TruncatesToTopNPlusSummary(t *testing.T) {
 	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, 3, asOf)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, 3, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -183,7 +219,7 @@ func TestRenderSVG_BreakdownLimit_UnlimitedClampsToLayoutBudget(t *testing.T) {
 	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, asOf)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -205,7 +241,7 @@ func TestRenderSVG_BreakdownEntry_LongLabelTruncatedWithEllipsis(t *testing.T) {
 	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, asOf)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -227,7 +263,7 @@ func TestRenderSVG_BreakdownLimit_OversizedPositiveClampsToLayoutBudget(t *testi
 	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, 10, asOf)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, 10, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -259,7 +295,7 @@ func TestRenderSVG_FlatMultiDayTrend_PointsShareMidpointWithoutOverlap(t *testin
 	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, asOf)
+	light, _, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, asOf)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -311,7 +347,7 @@ func TestRenderSVG_GoldenFile(t *testing.T) {
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 	renderedAt := time.Date(2026, 6, 22, 14, 30, 0, 0, time.UTC)
 
-	light, dark, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, renderedAt)
+	light, dark, err := render.RenderSVG(ds, true, sum, config.BreakdownPerModel, -1, renderedAt)
 	if err != nil {
 		t.Fatalf("RenderSVG() error = %v", err)
 	}
@@ -341,7 +377,7 @@ func TestAltText_HappyPath_SummarizesHeadlineStats(t *testing.T) {
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	got := render.AltText(ds, sum)
+	got := render.AltText(ds, true, sum)
 
 	for _, want := range []string{"Token Profile", "Tokens:", "4,100", "Cost:", "$6.95", "Streak:", "3 days"} {
 		if !strings.Contains(got, want) {
@@ -359,12 +395,31 @@ func TestAltText_EmptyDataset_NamesNoDataState(t *testing.T) {
 	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	got := render.AltText(ds, sum)
+	got := render.AltText(ds, false, sum)
 
 	if !strings.Contains(got, "No data yet") {
 		t.Errorf("AltText() = %q, want it to explicitly name the \"no data yet\" state", got)
 	}
 	if strings.Contains(got, "Tokens: 0") {
 		t.Errorf("AltText() = %q, should not report a misleadingly precise all-zero stat sentence", got)
+	}
+}
+
+// TestAltText_InactiveWindowWithHistory_ShowsRealStats is AltText's
+// counterpart to TestRenderSVG_InactiveWindowWithHistory_ShowsRealStatsNotNoDataYet
+// (code review F3): a user with real history but nothing in the current
+// window must get their real headline stats in alt text, not the brand-new
+// no-data sentence.
+func TestAltText_InactiveWindowWithHistory_ShowsRealStats(t *testing.T) {
+	ds := snapshot.MergedDataset{}
+	sum := summary.Summary{TotalTokens: 2000, TotalCost: 3.0, Streak: 0}
+
+	got := render.AltText(ds, true, sum)
+
+	if strings.Contains(got, "No data yet") {
+		t.Errorf("AltText() = %q, shows the brand-new no-data state despite hasHistory=true", got)
+	}
+	if !strings.Contains(got, "2,000") || !strings.Contains(got, "$3.00") {
+		t.Errorf("AltText() = %q, want it to report the real headline stats from history outside the current window", got)
 	}
 }

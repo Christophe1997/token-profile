@@ -24,6 +24,7 @@
 <text x="32" y="328" font-size="16" font-weight="600" fill="#1f2328">Streak: 3 days</text>
 <text x="32" y="360" font-size="12" font-weight="600" letter-spacing="1" fill="#656d76">Breakdown (per model):</text>
 
+
 <text x="32" y="384" font-size="13" fill="#1f2328">claude-sonnet-5</text>
 <text x="420" y="384" font-size="13" fill="#656d76" text-anchor="end">2,200</text>
 <text x="608" y="384" font-size="13" fill="#656d76" text-anchor="end">$3.30</text>
@@ -35,6 +36,7 @@
 <text x="32" y="428" font-size="13" fill="#1f2328">claude-opus-5</text>
 <text x="420" y="428" font-size="13" fill="#656d76" text-anchor="end">800</text>
 <text x="608" y="428" font-size="13" fill="#656d76" text-anchor="end">$2.00</text>
+
 
 
 

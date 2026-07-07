@@ -473,7 +473,7 @@ func TestRun_SVGMode_AltTextContainsHeadlineStats(t *testing.T) {
 		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
 	}}
 	sum := summary.Compute(ds, now, config.DefaultTrailingWindow)
-	wantAlt := html.EscapeString(render.AltText(ds, sum))
+	wantAlt := html.EscapeString(render.AltText(ds, true, sum))
 
 	if gotAlt != wantAlt {
 		t.Errorf("<img alt> = %q, want exactly %q (render.AltText for the same fixture)", gotAlt, wantAlt)

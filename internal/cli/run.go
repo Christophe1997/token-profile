@@ -274,6 +274,7 @@ func mergeRenderInject(deps RunDeps) error {
 
 	window := cmp.Or(deps.Config.TrailingWindow, config.DefaultTrailingWindow)
 	current := snapshot.FilterSince(merged, deps.Now.Add(-window))
+	hasHistory := len(merged.Rows) > 0
 	breakdownLimit := cmp.Or(deps.Config.BreakdownLimit, config.DefaultBreakdownLimit)
 
 	sum := summary.Compute(merged, deps.Now, window)
@@ -291,7 +292,7 @@ func mergeRenderInject(deps RunDeps) error {
 		card := render.Render(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
 		body = fenceCard(card)
 	default: // config.RenderModeSVG
-		body, err = svgCardBody(deps, current, sum, breakdownLimit)
+		body, err = svgCardBody(deps, current, hasHistory, sum, breakdownLimit)
 		if err != nil {
 			return err
 		}
@@ -321,8 +322,8 @@ func mergeRenderInject(deps RunDeps) error {
 // SVG-mode counterpart. The attribution line sits after a blank line,
 // outside the <picture> block, matching fenceCard's own placement of
 // render.GeneratedByLine() outside the ASCII card's fence (R2).
-func svgCardBody(deps RunDeps, current snapshot.MergedDataset, sum summary.Summary, breakdownLimit int) (string, error) {
-	light, dark, err := render.RenderSVG(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
+func svgCardBody(deps RunDeps, current snapshot.MergedDataset, hasHistory bool, sum summary.Summary, breakdownLimit int) (string, error) {
+	light, dark, err := render.RenderSVG(current, hasHistory, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
 	if err != nil {
 		return "", fmt.Errorf("rendering SVG card: %w", err)
 	}
@@ -334,7 +335,7 @@ func svgCardBody(deps RunDeps, current snapshot.MergedDataset, sum summary.Summa
 		return "", err
 	}
 
-	alt := html.EscapeString(render.AltText(current, sum))
+	alt := html.EscapeString(render.AltText(current, hasHistory, sum))
 	picture := fmt.Sprintf(
 		`<picture><source media="(prefers-color-scheme: dark)" srcset="%s"><img src="%s" alt="%s" width="100%%"></picture>`,
 		svgDarkRelPath, svgLightRelPath, alt,
