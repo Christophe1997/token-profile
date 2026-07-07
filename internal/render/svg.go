@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"html"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -376,11 +377,7 @@ func buildSVGTrend(ds snapshot.MergedDataset) svgTrend {
 		}
 	}
 
-	minTok, maxTok := tokens[0], tokens[0]
-	for _, v := range tokens[1:] {
-		minTok = min(minTok, v)
-		maxTok = max(maxTok, v)
-	}
+	minTok, maxTok := slices.Min(tokens), slices.Max(tokens)
 	span := maxTok - minTok
 
 	var points strings.Builder
