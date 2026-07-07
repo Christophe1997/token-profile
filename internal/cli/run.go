@@ -232,12 +232,19 @@ func fenceCard(card string) string {
 
 // collapsible wraps body in a <details> block so the card doesn't dominate
 // a profile README by default, with summaryText as the always-visible
-// toggle label. The blank lines around body are required, not cosmetic:
-// GitHub's markdown parser only processes markdown (e.g. body's fenced
-// code block) nested inside a raw HTML block when it's set off by blank
-// lines — without them the fence renders as literal HTML text.
-func collapsible(summaryText, body string) string {
-	return "<details>\n<summary>" + summaryText + "</summary>\n\n" + body + "\n\n</details>"
+// toggle label. open controls whether the section starts expanded (KTD6:
+// the SVG card defaults open since it's the new default presentation; the
+// ASCII opt-in stays closed, matching its pre-existing behavior). The blank
+// lines around body are required, not cosmetic: GitHub's markdown parser
+// only processes markdown (e.g. body's fenced code block) nested inside a
+// raw HTML block when it's set off by blank lines — without them the fence
+// renders as literal HTML text.
+func collapsible(summaryText, body string, open bool) string {
+	tag := "<details>"
+	if open {
+		tag = "<details open>"
+	}
+	return tag + "\n<summary>" + summaryText + "</summary>\n\n" + body + "\n\n</details>"
 }
 
 // mergeRenderInject re-derives the merged dataset from every machine's
@@ -272,6 +279,7 @@ func mergeRenderInject(deps RunDeps) error {
 	}
 
 	var body string
+	var open bool
 	switch resolveRenderMode(deps.Config.RenderMode) {
 	case config.RenderModeASCII:
 		card := render.Render(current, sum, deps.Config.Breakdown, breakdownLimit, deps.Now)
@@ -281,10 +289,11 @@ func mergeRenderInject(deps RunDeps) error {
 		if err != nil {
 			return err
 		}
+		open = true // KTD6: the new default presentation starts expanded
 	}
 
 	summaryText := render.CardTitle + " — " + render.Headline(sum)
-	updated, err := readme.Inject(readmeBytes, collapsible(summaryText, body))
+	updated, err := readme.Inject(readmeBytes, collapsible(summaryText, body, open))
 	if err != nil {
 		// readme.Inject's own error already wraps ErrMarkersMissing with
 		// guidance to run `token-profile init`; wrapping again here only

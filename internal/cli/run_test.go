@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -713,12 +714,20 @@ func TestFenceCard(t *testing.T) {
 // summaryText as the toggle label, keeping the blank lines GitHub's
 // markdown parser requires around markdown nested inside an HTML block —
 // without them, a fenced code block inside would render as literal text
-// rather than being parsed as markdown.
+// rather than being parsed as markdown. open controls whether the section
+// starts expanded (KTD6: the SVG card defaults open, the ASCII card stays
+// closed).
 func TestCollapsible(t *testing.T) {
-	got := collapsible("Tokens: 100", "```\ncard\n```")
+	got := collapsible("Tokens: 100", "```\ncard\n```", false)
 	want := "<details>\n<summary>Tokens: 100</summary>\n\n```\ncard\n```\n\n</details>"
 	if got != want {
-		t.Errorf("collapsible() = %q, want %q", got, want)
+		t.Errorf("collapsible(open=false) = %q, want %q", got, want)
+	}
+
+	got = collapsible("Tokens: 100", "```\ncard\n```", true)
+	want = "<details open>\n<summary>Tokens: 100</summary>\n\n```\ncard\n```\n\n</details>"
+	if got != want {
+		t.Errorf("collapsible(open=true) = %q, want %q", got, want)
 	}
 }
 
@@ -863,6 +872,9 @@ func TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles(t *testing.T) {
 		t.Fatalf("ReadFile(README.md) error = %v", err)
 	}
 	got := string(readmeBytes)
+	if !strings.Contains(got, "<details open>") {
+		t.Errorf("README missing <details open> — KTD6 wants the SVG card expanded by default:\n%s", got)
+	}
 	if !strings.Contains(got, "<picture>") {
 		t.Errorf("README missing <picture> markup:\n%s", got)
 	}
@@ -969,7 +981,7 @@ func TestRun_ASCIIMode_MatchesPriorRenderExactly(t *testing.T) {
 	sum := summary.Compute(ds, now, config.DefaultTrailingWindow)
 	wantCard := render.Render(ds, sum, config.BreakdownPerModel, config.DefaultBreakdownLimit, now)
 	wantSummaryText := render.CardTitle + " — " + render.Headline(sum)
-	wantInjected := collapsible(wantSummaryText, fenceCard(wantCard))
+	wantInjected := collapsible(wantSummaryText, fenceCard(wantCard), false)
 
 	if gotInjected != wantInjected {
 		t.Errorf("injected ASCII content =\n%s\nwant exactly\n%s", gotInjected, wantInjected)
@@ -1029,5 +1041,134 @@ func TestRun_SVGMode_SecondRunOverwritesSameFiles(t *testing.T) {
 	tracked := runGitT(t, verify, "ls-tree", "-r", "--name-only", "HEAD")
 	if svgCount := strings.Count(tracked, ".token-profile/card-"); svgCount != 2 {
 		t.Errorf("tracked card-*.svg entries in HEAD = %d, want exactly 2:\n%s", svgCount, tracked)
+	}
+}
+
+// extractAttr returns attr's value out of a raw HTML/markdown blob (e.g.
+// `alt="Token Profile — last 1 day..."`), failing the test if attr isn't
+// present. It doesn't handle escaped quotes inside the value — not needed
+// here, since html.EscapeString never emits a literal `"` (it renders as
+// `&#34;`).
+func extractAttr(t *testing.T, blob, attr string) string {
+	t.Helper()
+	marker := attr + `="`
+	idx := strings.Index(blob, marker)
+	if idx == -1 {
+		t.Fatalf("missing %s=\"...\" attribute in:\n%s", attr, blob)
+	}
+	start := idx + len(marker)
+	end := strings.Index(blob[start:], `"`)
+	if end == -1 {
+		t.Fatalf("unterminated %s attribute in:\n%s", attr, blob)
+	}
+	return blob[start : start+end]
+}
+
+// TestRun_SVGMode_AltTextContainsHeadlineStats covers AE4: the injected
+// <picture>'s <img alt="..."> must carry the actual headline
+// tokens/cost/streak summary render.AltText produces for this run's
+// fixture, computed independently here the same way
+// TestRun_ASCIIMode_MatchesPriorRenderExactly cross-checks the ASCII
+// path — not just that the picture/source markup exists (already covered
+// by TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles), so a
+// screen reader or non-rendering context actually gets the core numbers.
+func TestRun_SVGMode_AltTextContainsHeadlineStats(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "svg-alt")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	deps := RunDeps{
+		// RenderMode deliberately left unset — same SVG-default premise as
+		// TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles.
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-svg-alt",
+		Now:       now,
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-alt")
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	gotAlt := extractAttr(t, string(readmeBytes), "alt")
+
+	// Same single-run fixture Run() resolved: the merged dataset (there's
+	// no other machine or prior snapshot) and the current window are
+	// identical, so this reproduces exactly what svgCardBody computed.
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
+	}}
+	sum := summary.Compute(ds, now, config.DefaultTrailingWindow)
+	wantAlt := html.EscapeString(render.AltText(ds, sum))
+
+	if gotAlt != wantAlt {
+		t.Errorf("<img alt> = %q, want exactly %q (render.AltText for the same fixture)", gotAlt, wantAlt)
+	}
+	for _, want := range []string{"1,000", "$1.50", "Streak"} {
+		if !strings.Contains(gotAlt, want) {
+			t.Errorf("<img alt> = %q, want it to contain headline substring %q", gotAlt, want)
+		}
+	}
+}
+
+// TestRun_SVGMode_AttributionOutsidePictureBlock covers R2 on the SVG
+// render path specifically: TestRun_EndToEnd_CardIsFencedAndCollapsible
+// already proves the attribution line sits after the ASCII card's closing
+// fence, but nothing previously proved the same ordering for svgCardBody's
+// <picture> markup — this is that SVG-branch counterpart.
+func TestRun_SVGMode_AttributionOutsidePictureBlock(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "svg-order")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		// RenderMode deliberately left unset — same SVG-default premise as
+		// TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles.
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-svg-order",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-order")
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+
+	startIdx := strings.Index(got, readme.StartMarker)
+	endIdx := strings.Index(got, readme.EndMarker)
+	if startIdx == -1 || endIdx == -1 || endIdx < startIdx {
+		t.Fatalf("README missing token-profile markers:\n%s", got)
+	}
+	injected := strings.TrimSpace(got[startIdx+len(readme.StartMarker) : endIdx])
+
+	summaryEnd := strings.Index(injected, "</summary>")
+	pictureOpen := strings.Index(injected, "<picture>")
+	pictureClose := strings.Index(injected, "</picture>")
+	attribution := strings.Index(injected, render.GeneratedByLine())
+
+	if summaryEnd == -1 || pictureOpen == -1 || pictureClose == -1 || attribution == -1 {
+		t.Fatalf("injected content missing an expected part: summaryEnd=%d pictureOpen=%d pictureClose=%d attribution=%d\ninjected:\n%s",
+			summaryEnd, pictureOpen, pictureClose, attribution, injected)
+	}
+	if !(summaryEnd < pictureOpen && pictureOpen < pictureClose && pictureClose < attribution) {
+		t.Errorf("injected content out of order: summaryEnd=%d pictureOpen=%d pictureClose=%d attribution=%d\ninjected:\n%s",
+			summaryEnd, pictureOpen, pictureClose, attribution, injected)
 	}
 }
