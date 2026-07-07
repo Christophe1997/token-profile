@@ -103,22 +103,67 @@ go install github.com/Christophe1997/token-profile/cmd/token-profile@latest
 ## Quick start
 
 ```sh
-token-profile init --config ~/.token-profile/config.json
+token-profile init
 ```
 
-This is idempotent and safe to re-run. It:
+The first time you run this with no config file yet, `init` launches a short
+interactive wizard instead of failing: it asks for your GitHub username,
+clone protocol (https/ssh), and local clone path — each pre-filled with a
+sensible guess — then:
 
-1. Scaffolds `<!-- token-profile:start -->` / `<!-- token-profile:end -->`
-   markers into your target repo's `README.md`, if they aren't there yet.
-2. Writes a scheduling-entry snippet (a launchd plist on macOS, a crontab
-   line elsewhere) to `--schedule-dest`, for you to review and install
-   yourself — token-profile never touches your real crontab or
-   `LaunchAgents` directory on its own.
-3. Performs a first run: resolves your local usage, writes this machine's
+1. Clones your profile repo into place (or adopts an existing clone already
+   sitting at that path, as long as its remote matches what you entered).
+2. Writes a full config file with the three collected fields plus safe,
+   hand-editable defaults for everything else (see
+   [Configuration](#configuration)).
+3. Scaffolds `<!-- token-profile:start -->` / `<!-- token-profile:end -->`
+   markers into the target repo's `README.md`, if they aren't there yet.
+4. Performs a first run: resolves your local usage, writes this machine's
    snapshot, renders the card, and commits + pushes the updated README.
+5. Asks whether to register the refresh schedule now (default: every 6
+   hours) — on yes, `init` installs it itself via `launchctl bootstrap`
+   (macOS) or `crontab` (Linux/other), no manual copy-paste required. A
+   reviewable snippet is still written to `--schedule-dest` either way, in
+   case you'd rather install it by hand or on another machine.
+
+Re-running `init` against an existing config skips the wizard entirely and
+just performs another run — it's idempotent and safe to re-run on any
+machine.
 
 After that, keep the profile fresh by running `token-profile run` again —
-manually, or on whatever schedule you installed from the snippet above.
+manually, or on whatever schedule you registered above.
+
+### Dry run
+
+Add `--dry-run` to either `init` or `run` to perform every real write
+(clone, config, snapshot, render, README) but stop before the commit/push,
+printing a summary of what would have been committed instead:
+
+```sh
+token-profile init --dry-run
+token-profile run --dry-run
+```
+
+On `init`, a dry run also skips the schedule-registration prompt entirely —
+installing a live schedule isn't something a dry run should ever do.
+
+### Cleanup
+
+```sh
+token-profile cleanup
+```
+
+Reverses token-profile's footprint: deregisters the refresh schedule (it
+checks live state first, so it never falsely reports removing something
+that was never registered) and strips the README card and
+`.token-profile/` from the target repo's working tree. It requires a real
+terminal — `cleanup` shows exactly what it's about to touch, including any
+uncommitted changes already sitting in the target repo (e.g. from a prior
+`--dry-run`), before asking you to confirm. It never commits or pushes —
+review the resulting working-tree diff and commit it yourself — and it
+never touches `~/.token-profile/` itself (your config, machine ID, or
+cloned repos), only this machine's schedule registration and the target
+repo's own footprint.
 
 ## Manual setup
 
@@ -166,6 +211,7 @@ default.
 | `trailingWindow` | duration string (e.g. `"720h"`) | *(unset)* | How far back the rendered card reaches, and the length of the window compared against for the window-over-window rate. Also bounds how far back usage is queried on each run. Unset defers to a 30-day default, matching agentsview's own. |
 | `breakdownLimit` | integer | `3` | How many entries the breakdown section shows individually, highest-token first; the rest are folded into one "N more" summary line rather than dropped silently. `0` (unset) defers to the default of 3; a negative value shows every entry with no cap **in `ascii` mode**. The default `svg` card's fixed-height canvas always caps at 4 rows regardless of this setting — use `renderMode: ascii` if you need every entry visible. |
 | `machineIdPath` | string | `~/.token-profile/machine-id` | Where this machine's cached random identity is stored. Identity is random, not derived from hostname, so two machines that happen to share a hostname never collide. |
+| `scheduleInterval` | duration string, one of `1h`/`2h`/`3h`/`4h`/`6h`/`8h`/`12h`/`24h` | `6h` | How often the schedule `init` registers (or the `--schedule-dest` snippet describes) fires. Must be an hourly divisor of a day so a run always lands on the same wall-clock hours day over day — any other value is rejected with an error naming the accepted set. |
 
 Example:
 
