@@ -240,7 +240,7 @@ func loadOrScaffoldConfig(configPath string) (config.Config, error) {
 	}
 
 	if cfg.TargetRepo == "" && !configExists {
-		if err := config.WriteTemplate(configPath, ""); err != nil {
+		if err := config.WriteTemplate(configPath, config.TemplateFields{}); err != nil {
 			return config.Config{}, fmt.Errorf("scaffolding starter config: %w", err)
 		}
 		return config.Config{}, fmt.Errorf(
@@ -398,7 +398,7 @@ func bootstrapConfig(ctx context.Context, deps bootstrapDeps) (config.Config, er
 		return loadOrScaffoldConfig(deps.ConfigPath)
 	}
 
-	if err := config.WriteTemplate(deps.ConfigPath, dest); err != nil {
+	if err := config.WriteTemplate(deps.ConfigPath, config.TemplateFields{TargetRepo: dest}); err != nil {
 		return config.Config{}, fmt.Errorf("writing config after auto-clone: %w", err)
 	}
 	return config.Load(deps.ConfigPath)

@@ -33,7 +33,10 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 		"breakdown": "per-tool",
 		"trailingWindow": "168h",
 		"breakdownLimit": 5,
-		"machineIdPath": "/home/adopter/.token-profile/machine-id"
+		"machineIdPath": "/home/adopter/.token-profile/machine-id",
+		"remoteRepo": "git@github.com:adopter/username.git",
+		"cloneProtocol": "ssh",
+		"scheduleInterval": "12h"
 	}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -45,12 +48,15 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 	}
 
 	want := config.Config{
-		TargetRepo:     "/home/adopter/username",
-		Breakdown:      config.BreakdownPerTool,
-		TrailingWindow: 168 * time.Hour,
-		BreakdownLimit: 5,
-		MachineIDPath:  "/home/adopter/.token-profile/machine-id",
-		RenderMode:     config.RenderModeSVG,
+		TargetRepo:       "/home/adopter/username",
+		Breakdown:        config.BreakdownPerTool,
+		TrailingWindow:   168 * time.Hour,
+		BreakdownLimit:   5,
+		MachineIDPath:    "/home/adopter/.token-profile/machine-id",
+		RenderMode:       config.RenderModeSVG,
+		RemoteRepo:       "git@github.com:adopter/username.git",
+		CloneProtocol:    config.CloneProtocolSSH,
+		ScheduleInterval: 12 * time.Hour,
 	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
@@ -93,6 +99,29 @@ func TestLoad_MissingRenderModeDefaultsToSVG(t *testing.T) {
 	}
 }
 
+// TestLoad_MissingCloneProtocolAndScheduleIntervalDefaultFromDefault covers
+// the same "unset key leaves Default()'s pre-populated value alone" rule
+// TestLoad_MissingRenderModeDefaultsToSVG already exercises for RenderMode.
+func TestLoad_MissingCloneProtocolAndScheduleIntervalDefaultFromDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"targetRepo": "/home/adopter/username"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.CloneProtocol != config.CloneProtocolHTTPS {
+		t.Errorf("CloneProtocol = %q, want %q", cfg.CloneProtocol, config.CloneProtocolHTTPS)
+	}
+	if cfg.ScheduleInterval != config.DefaultScheduleInterval {
+		t.Errorf("ScheduleInterval = %v, want %v", cfg.ScheduleInterval, config.DefaultScheduleInterval)
+	}
+}
+
 func TestLoad_ExplicitAsciiRenderMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -107,6 +136,28 @@ func TestLoad_ExplicitAsciiRenderMode(t *testing.T) {
 	}
 	if cfg.RenderMode != config.RenderModeASCII {
 		t.Errorf("RenderMode = %q, want %q", cfg.RenderMode, config.RenderModeASCII)
+	}
+}
+
+// TestLoad_ScheduleIntervalDurationStringRoundTrips isolates the
+// scheduleInterval-as-duration-string parsing this unit adds to
+// UnmarshalJSON, mirroring TrailingWindow's own hand-edited-string
+// round-trip (exercised together with other fields in
+// TestLoad_ValidFileOverridesDefaults).
+func TestLoad_ScheduleIntervalDurationStringRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"scheduleInterval": "12h"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.ScheduleInterval != 12*time.Hour {
+		t.Errorf("ScheduleInterval = %v, want %v", cfg.ScheduleInterval, 12*time.Hour)
 	}
 }
 
@@ -143,10 +194,48 @@ func TestLoad_InvalidRenderModeIsRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_InvalidScheduleIntervalIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"scheduleInterval": "5h"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error for an unsupported scheduleInterval")
+	}
+	for _, want := range []string{"1h", "2h", "3h", "4h", "6h", "8h", "12h", "24h"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to name accepted divisor %q", err, want)
+		}
+	}
+}
+
+func TestLoad_InvalidCloneProtocolIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"cloneProtocol": "ftp"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error for an invalid clone protocol")
+	}
+	for _, want := range []string{string(config.CloneProtocolHTTPS), string(config.CloneProtocolSSH)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Load() error = %q, want it to name recognized clone protocol %q", err, want)
+		}
+	}
+}
+
 func TestWriteTemplate_CreatesLoadableConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
-	if err := config.WriteTemplate(path, ""); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 
@@ -165,7 +254,7 @@ func TestWriteTemplate_CreatesLoadableConfig(t *testing.T) {
 func TestWriteTemplate_ExplicitlyWritesRenderMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
-	if err := config.WriteTemplate(path, ""); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 
@@ -181,7 +270,7 @@ func TestWriteTemplate_ExplicitlyWritesRenderMode(t *testing.T) {
 func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
-	if err := config.WriteTemplate(path, ""); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{}); err != nil {
 		t.Fatalf("WriteTemplate() first call error = %v, want nil", err)
 	}
 	before, err := os.ReadFile(path)
@@ -189,7 +278,7 @@ func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
-	if err := config.WriteTemplate(path, ""); err == nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{}); err == nil {
 		t.Fatal("WriteTemplate() second call error = nil, want an error for an existing file")
 	}
 
@@ -205,7 +294,7 @@ func TestWriteTemplate_RefusesToClobberExistingFile(t *testing.T) {
 func TestWriteTemplate_CreatesParentDirs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "deeper", "config.json")
 
-	if err := config.WriteTemplate(path, ""); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 
@@ -218,7 +307,7 @@ func TestWriteTemplate_NonEmptyTargetRepo_RoundTripsThroughLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	const targetRepo = "/home/adopter/.token-profile/repos/octocat"
 
-	if err := config.WriteTemplate(path, targetRepo); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{TargetRepo: targetRepo}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 	cfg, err := config.Load(path)
@@ -237,7 +326,7 @@ func TestWriteTemplate_TargetRepoWithBackslashesAndQuotes_RoundTripsThroughLoad(
 	path := filepath.Join(t.TempDir(), "config.json")
 	const targetRepo = `C:\Users\you\code\"you"`
 
-	if err := config.WriteTemplate(path, targetRepo); err != nil {
+	if err := config.WriteTemplate(path, config.TemplateFields{TargetRepo: targetRepo}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)
 	}
 	cfg, err := config.Load(path)
@@ -246,6 +335,70 @@ func TestWriteTemplate_TargetRepoWithBackslashesAndQuotes_RoundTripsThroughLoad(
 	}
 	if cfg.TargetRepo != targetRepo {
 		t.Errorf("TargetRepo = %q, want %q (raw string templating would have corrupted embedded backslashes/quotes)", cfg.TargetRepo, targetRepo)
+	}
+}
+
+// TestWriteTemplate_ZeroValueCloneProtocolAndScheduleInterval_RoundTripsThroughLoad
+// covers the freshly-scaffolded-config integration scenario: a caller that
+// hasn't collected RemoteRepo/CloneProtocol/ScheduleInterval yet (the
+// TemplateFields zero value) still gets a file that loads and validates
+// cleanly, with the same defaults Default() would apply.
+func TestWriteTemplate_ZeroValueCloneProtocolAndScheduleInterval_RoundTripsThroughLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	if err := config.WriteTemplate(path, config.TemplateFields{TargetRepo: "/home/adopter/username"}); err != nil {
+		t.Fatalf("WriteTemplate() error = %v, want nil", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
+	}
+	if cfg.CloneProtocol != config.CloneProtocolHTTPS {
+		t.Errorf("CloneProtocol = %q, want %q", cfg.CloneProtocol, config.CloneProtocolHTTPS)
+	}
+	if cfg.ScheduleInterval != config.DefaultScheduleInterval {
+		t.Errorf("ScheduleInterval = %v, want %v", cfg.ScheduleInterval, config.DefaultScheduleInterval)
+	}
+	if cfg.RemoteRepo != "" {
+		t.Errorf("RemoteRepo = %q, want empty", cfg.RemoteRepo)
+	}
+}
+
+// TestWriteTemplate_WizardCollectedFields_RoundTripThroughLoad covers the
+// non-default case: a wizard that collected all three new fields gets them
+// back verbatim after Load(), and the scaffolded file validates cleanly.
+func TestWriteTemplate_WizardCollectedFields_RoundTripThroughLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	fields := config.TemplateFields{
+		TargetRepo:       "/home/adopter/.token-profile/repos/octocat",
+		RemoteRepo:       "git@github.com:octocat/octocat.git",
+		CloneProtocol:    config.CloneProtocolSSH,
+		ScheduleInterval: 12 * time.Hour,
+	}
+
+	if err := config.WriteTemplate(path, fields); err != nil {
+		t.Fatalf("WriteTemplate() error = %v, want nil", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
+	}
+	if cfg.RemoteRepo != fields.RemoteRepo {
+		t.Errorf("RemoteRepo = %q, want %q", cfg.RemoteRepo, fields.RemoteRepo)
+	}
+	if cfg.CloneProtocol != fields.CloneProtocol {
+		t.Errorf("CloneProtocol = %q, want %q", cfg.CloneProtocol, fields.CloneProtocol)
+	}
+	if cfg.ScheduleInterval != fields.ScheduleInterval {
+		t.Errorf("ScheduleInterval = %v, want %v", cfg.ScheduleInterval, fields.ScheduleInterval)
 	}
 }
 
@@ -264,5 +417,11 @@ func TestDefault_UsesPerModelBreakdownAndZeroTrailingWindow(t *testing.T) {
 	want := filepath.Join(home, ".token-profile", "machine-id")
 	if cfg.MachineIDPath != want {
 		t.Errorf("MachineIDPath = %q, want %q", cfg.MachineIDPath, want)
+	}
+	if cfg.CloneProtocol != config.CloneProtocolHTTPS {
+		t.Errorf("CloneProtocol = %q, want %q", cfg.CloneProtocol, config.CloneProtocolHTTPS)
+	}
+	if cfg.ScheduleInterval != config.DefaultScheduleInterval {
+		t.Errorf("ScheduleInterval = %v, want %v", cfg.ScheduleInterval, config.DefaultScheduleInterval)
 	}
 }

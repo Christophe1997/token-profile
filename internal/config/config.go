@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -29,6 +30,19 @@ const DefaultTrailingWindow = 30 * 24 * time.Hour
 // Config.BreakdownLimit.
 const DefaultBreakdownLimit = 3
 
+// DefaultScheduleInterval is the scheduled-run cadence used when
+// ScheduleInterval is unset (zero) — see Config.ScheduleInterval.
+const DefaultScheduleInterval = 6 * time.Hour
+
+// validScheduleIntervals are the hourly divisors of 24 that produce a clean
+// "every N hours" cron/launchd schedule (KTD10): each one divides a day
+// evenly, so a run always lands on the same wall-clock hours day over day.
+// Any other interval (e.g. 5h) would drift the run time across days.
+var validScheduleIntervals = []time.Duration{
+	1 * time.Hour, 2 * time.Hour, 3 * time.Hour, 4 * time.Hour,
+	6 * time.Hour, 8 * time.Hour, 12 * time.Hour, 24 * time.Hour,
+}
+
 // BreakdownMode selects how the rendered usage breakdown groups data.
 type BreakdownMode string
 
@@ -44,6 +58,14 @@ type RenderMode string
 const (
 	RenderModeSVG   RenderMode = "svg"
 	RenderModeASCII RenderMode = "ascii"
+)
+
+// CloneProtocol selects the URL scheme used to clone RemoteRepo.
+type CloneProtocol string
+
+const (
+	CloneProtocolHTTPS CloneProtocol = "https"
+	CloneProtocolSSH   CloneProtocol = "ssh"
 )
 
 // Config is token-profile's configuration schema.
@@ -65,15 +87,27 @@ type Config struct {
 	MachineIDPath string `json:"machineIdPath,omitzero"`
 	// RenderMode selects which dashboard card gets rendered into the README.
 	RenderMode RenderMode `json:"renderMode,omitzero"`
+	// RemoteRepo is the git remote URL `init`'s wizard clones TargetRepo
+	// from. Blank means TargetRepo already exists locally.
+	RemoteRepo string `json:"remoteRepo,omitzero"`
+	// CloneProtocol selects the URL scheme used to clone RemoteRepo. Zero
+	// (unset) defers to Default()'s "https".
+	CloneProtocol CloneProtocol `json:"cloneProtocol,omitzero"`
+	// ScheduleInterval is how often the scheduled run invokes
+	// token-profile. Zero (unset) defers to DefaultScheduleInterval; any
+	// non-zero value must be one of validScheduleIntervals (KTD10).
+	ScheduleInterval time.Duration `json:"scheduleInterval,omitzero"`
 }
 
-// UnmarshalJSON decodes Config, accepting trailingWindow as a
-// time.ParseDuration-compatible string (e.g. "168h") rather than a raw
-// nanosecond count, since config files are hand-edited.
+// UnmarshalJSON decodes Config, accepting trailingWindow and
+// scheduleInterval as time.ParseDuration-compatible strings (e.g. "168h",
+// "12h") rather than raw nanosecond counts, since config files are
+// hand-edited.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
 	aux := struct {
-		TrailingWindow string `json:"trailingWindow,omitzero"`
+		TrailingWindow   string `json:"trailingWindow,omitzero"`
+		ScheduleInterval string `json:"scheduleInterval,omitzero"`
 		*plain
 	}{
 		plain: (*plain)(c),
@@ -88,15 +122,24 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		}
 		c.TrailingWindow = d
 	}
+	if aux.ScheduleInterval != "" {
+		d, err := time.ParseDuration(aux.ScheduleInterval)
+		if err != nil {
+			return fmt.Errorf("invalid scheduleInterval %q: %w", aux.ScheduleInterval, err)
+		}
+		c.ScheduleInterval = d
+	}
 	return nil
 }
 
 // Default returns the configuration used when no config file is present.
 func Default() Config {
 	return Config{
-		Breakdown:     BreakdownPerModel,
-		MachineIDPath: defaultMachineIDPath(),
-		RenderMode:    RenderModeSVG,
+		Breakdown:        BreakdownPerModel,
+		MachineIDPath:    defaultMachineIDPath(),
+		RenderMode:       RenderModeSVG,
+		CloneProtocol:    CloneProtocolHTTPS,
+		ScheduleInterval: DefaultScheduleInterval,
 	}
 }
 
@@ -125,8 +168,8 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate reports whether cfg holds a recognized breakdown mode and render
-// mode.
+// Validate reports whether cfg holds a recognized breakdown mode, render
+// mode, clone protocol, and schedule interval.
 func (c Config) Validate() error {
 	switch c.Breakdown {
 	case BreakdownPerModel, BreakdownPerTool, BreakdownCombined:
@@ -140,38 +183,78 @@ func (c Config) Validate() error {
 		return fmt.Errorf("invalid render mode %q (want %q or %q)",
 			c.RenderMode, RenderModeSVG, RenderModeASCII)
 	}
+	switch c.CloneProtocol {
+	case CloneProtocolHTTPS, CloneProtocolSSH:
+	default:
+		return fmt.Errorf("invalid clone protocol %q (want %q or %q)",
+			c.CloneProtocol, CloneProtocolHTTPS, CloneProtocolSSH)
+	}
+	if !slices.Contains(validScheduleIntervals, c.ScheduleInterval) {
+		return fmt.Errorf("invalid scheduleInterval %s (want one of %v)",
+			c.ScheduleInterval, validScheduleIntervals)
+	}
 	return nil
 }
 
 // configTemplateData is the JSON shape WriteTemplate scaffolds. It carries
-// only targetRepo, breakdown, and renderMode — trailingWindow and
-// machineIdPath are deliberately omitted rather than spelled out blank:
-// UnmarshalJSON overwrites Breakdown/MachineIDPath onto Default()'s
-// pre-populated values whenever their JSON key is present, even at a zero
-// value, so an explicit blank key here would corrupt those defaults the
-// next time this same file is loaded.
+// only targetRepo, breakdown, renderMode, remoteRepo, cloneProtocol, and
+// scheduleInterval — trailingWindow and machineIdPath are deliberately
+// omitted rather than spelled out blank: UnmarshalJSON overwrites
+// Breakdown/MachineIDPath onto Default()'s pre-populated values whenever
+// their JSON key is present, even at a zero value, so an explicit blank key
+// here would corrupt those defaults the next time this same file is loaded.
+// ScheduleInterval is carried as a string (its Config.String() form, e.g.
+// "6h0m0s") rather than time.Duration's raw nanosecond encoding, matching
+// how a hand-edited config expresses it (see Config.UnmarshalJSON).
 type configTemplateData struct {
-	TargetRepo string        `json:"targetRepo"`
-	Breakdown  BreakdownMode `json:"breakdown"`
-	RenderMode RenderMode    `json:"renderMode"`
+	TargetRepo       string        `json:"targetRepo"`
+	Breakdown        BreakdownMode `json:"breakdown"`
+	RenderMode       RenderMode    `json:"renderMode"`
+	RemoteRepo       string        `json:"remoteRepo"`
+	CloneProtocol    CloneProtocol `json:"cloneProtocol"`
+	ScheduleInterval string        `json:"scheduleInterval"`
 }
 
-// WriteTemplate scaffolds a starter config file at path with targetRepo
-// pre-filled (blank if the caller has nothing to suggest yet), creating
-// parent directories as needed. It refuses to overwrite an existing file —
-// same atomic O_CREATE|O_EXCL convention as internal/cli/lock.go's
-// writeLockFile. targetRepo is JSON-encoded via json.MarshalIndent rather
-// than spliced into a raw string template, so an arbitrary local path (a
-// backslash on Windows, an embedded quote) round-trips safely instead of
-// corrupting the JSON.
-func WriteTemplate(path, targetRepo string) error {
+// TemplateFields bundles the values a wizard collects before a starter
+// config exists yet — a struct rather than positional args, since
+// TargetRepo and RemoteRepo are same-shaped strings a positional mixup
+// would silently swap.
+type TemplateFields struct {
+	// TargetRepo is the path to the target repo's local clone, resolved by
+	// the caller (e.g. the wizard's clone step) — WriteTemplate itself
+	// never sets it.
+	TargetRepo string
+	// RemoteRepo is the git remote URL the wizard would clone TargetRepo
+	// from, or "" if TargetRepo already exists locally.
+	RemoteRepo string
+	// CloneProtocol is the wizard's chosen clone URL scheme. Zero ("")
+	// resolves to CloneProtocolHTTPS so the scaffolded file always holds a
+	// valid enum value — see configTemplateData's doc comment on why an
+	// explicit-but-invalid key would corrupt reload otherwise.
+	CloneProtocol CloneProtocol
+	// ScheduleInterval is the wizard's chosen scheduled-run cadence. Zero
+	// resolves to DefaultScheduleInterval, for the same reason.
+	ScheduleInterval time.Duration
+}
+
+// WriteTemplate scaffolds a starter config file at path from fields,
+// creating parent directories as needed. It refuses to overwrite an
+// existing file — same atomic O_CREATE|O_EXCL convention as
+// internal/cli/lock.go's writeLockFile. String fields are JSON-encoded via
+// json.MarshalIndent rather than spliced into a raw string template, so an
+// arbitrary local path or URL (a backslash on Windows, an embedded quote)
+// round-trips safely instead of corrupting the JSON.
+func WriteTemplate(path string, fields TemplateFields) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating config directory for %s: %w", path, err)
 	}
 	data, err := json.MarshalIndent(configTemplateData{
-		TargetRepo: targetRepo,
-		Breakdown:  BreakdownPerModel,
-		RenderMode: RenderModeSVG,
+		TargetRepo:       fields.TargetRepo,
+		Breakdown:        BreakdownPerModel,
+		RenderMode:       RenderModeSVG,
+		RemoteRepo:       fields.RemoteRepo,
+		CloneProtocol:    cmp.Or(fields.CloneProtocol, CloneProtocolHTTPS),
+		ScheduleInterval: cmp.Or(fields.ScheduleInterval, DefaultScheduleInterval).String(),
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding config template: %w", err)
