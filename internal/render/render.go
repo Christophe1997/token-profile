@@ -197,6 +197,27 @@ type breakdownEntry struct {
 	Cost   float64
 }
 
+// splitBreakdownEntries divides entries into the ones shown individually and
+// the ones folded into an "N more" summary, shared by both the ASCII and SVG
+// renderers so a future truncation-semantics change only happens in one
+// place. limit <= 0 shows every entry (no split).
+func splitBreakdownEntries(entries []breakdownEntry, limit int) (shown, omitted []breakdownEntry) {
+	if limit > 0 && len(entries) > limit {
+		return entries[:limit], entries[limit:]
+	}
+	return entries, nil
+}
+
+// sumBreakdownEntries totals entries' tokens and cost, used to summarize
+// whatever splitBreakdownEntries folds into an "N more" line.
+func sumBreakdownEntries(entries []breakdownEntry) (tokens int64, cost float64) {
+	for _, e := range entries {
+		tokens += e.Tokens
+		cost += e.Cost
+	}
+	return tokens, cost
+}
+
 // breakdownLines renders mode's grouped entries, showing at most limit of
 // them individually (sorted by descending tokens, so the top contributors
 // lead) and folding whatever's left into one "N more" summary line — never
@@ -208,20 +229,12 @@ func breakdownLines(ds snapshot.MergedDataset, mode config.BreakdownMode, limit 
 		return append(lines, "  "+noDataMessage)
 	}
 
-	shown, omitted := entries, []breakdownEntry(nil)
-	if limit > 0 && len(entries) > limit {
-		shown, omitted = entries[:limit], entries[limit:]
-	}
+	shown, omitted := splitBreakdownEntries(entries, limit)
 	for _, e := range shown {
 		lines = append(lines, fmt.Sprintf("  %s — %s tokens ($%.2f)", e.Label, formatTokens(e.Tokens), e.Cost))
 	}
 	if len(omitted) > 0 {
-		var tokens int64
-		var cost float64
-		for _, e := range omitted {
-			tokens += e.Tokens
-			cost += e.Cost
-		}
+		tokens, cost := sumBreakdownEntries(omitted)
 		lines = append(lines, fmt.Sprintf("  … %d more — %s tokens ($%.2f)", len(omitted), formatTokens(tokens), cost))
 	}
 	return lines

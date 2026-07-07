@@ -129,6 +129,11 @@ type svgCardData struct {
 	Width, Height int
 	Title         string
 
+	// PlotLeft/Right/Bottom mirror svgPlotLeft/Right/Bottom (KTD3) so the
+	// trend axis line and labels stay in the same coordinate space as
+	// buildSVGTrend's scaled polyline without repeating the literals.
+	PlotLeft, PlotRight, PlotBottom int
+
 	NoData        bool
 	NoDataMessage string
 
@@ -152,10 +157,13 @@ func xmlEscape(s string) string {
 // svgTemplateSource is the shared card layout (KTD1, KTD2): one
 // text/template drawing fixed-position rects/text/polylines, with only
 // Palette colors and the content fields (Stats, Trend, BreakdownRows, ...)
-// varying between calls. Coordinates are hardcoded to match the constants
-// above exactly, since they never vary independently of them — see
-// buildSVGCardData and buildSVGTrend for the Go-side math that must stay in
-// sync with these numbers.
+// varying between calls. Most coordinates are hardcoded to match the
+// constants above exactly, since they never vary independently of them —
+// see buildSVGCardData and buildSVGTrend for the Go-side math that must
+// stay in sync with these numbers. The trend plot rectangle's own edges
+// (PlotLeft/Right/Bottom) are the one exception, threaded through as data
+// fields rather than repeated literals, since buildSVGTrend's polyline math
+// and the axis/gridline drawn here must never drift apart.
 const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Width}}" height="{{.Height}}" viewBox="0 0 {{.Width}} {{.Height}}" role="img" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title>{{esc .Title}}</title>
 <rect width="100%" height="100%" fill="{{.Palette.Background}}"/>
@@ -170,16 +178,16 @@ const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Wid
 <text x="{{.X}}" y="118" font-size="26" font-weight="700" fill="{{$.Palette.Text}}">{{esc .Value}}{{if .Delta}}<tspan font-size="15" font-weight="600" fill="{{deltaColor $.Palette .DeltaClass}}"> {{esc .Delta}}</tspan>{{end}}</text>
 {{end}}
 <text x="32" y="152" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">TREND</text>
-<line x1="90" y1="288" x2="608" y2="288" stroke="{{.Palette.Grid}}" stroke-width="1"/>
+<line x1="{{.PlotLeft}}" y1="{{.PlotBottom}}" x2="{{.PlotRight}}" y2="{{.PlotBottom}}" stroke="{{.Palette.Grid}}" stroke-width="1"/>
 {{if .Trend.Single}}
 <circle cx="349" cy="228" r="5" fill="{{.Palette.Accent}}"/>
 <text x="349" y="208" font-size="13" fill="{{.Palette.Text}}" text-anchor="middle">{{esc .Trend.PointText}}</text>
 {{else}}
 <polyline points="{{.Trend.Polyline}}" fill="none" stroke="{{.Palette.Accent}}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="90" y="306" font-size="12" fill="{{.Palette.Muted}}">{{esc .Trend.StartLabel}}</text>
-<text x="608" y="306" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.EndLabel}}</text>
+<text x="{{.PlotLeft}}" y="306" font-size="12" fill="{{.Palette.Muted}}">{{esc .Trend.StartLabel}}</text>
+<text x="{{.PlotRight}}" y="306" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.EndLabel}}</text>
 <text x="82" y="172" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.MaxLabel}}</text>
-<text x="82" y="288" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.MinLabel}}</text>
+<text x="82" y="{{.PlotBottom}}" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.MinLabel}}</text>
 {{end}}
 <text x="32" y="328" font-size="16" font-weight="600" fill="{{.Palette.Text}}">{{esc .Streak}}</text>
 <text x="32" y="360" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">{{esc .BreakdownHeading}}</text>
@@ -253,6 +261,9 @@ func buildSVGCardData(ds snapshot.MergedDataset, sum summary.Summary, mode confi
 		Height:      svgHeight,
 		Title:       titleLine(ds),
 		LastUpdated: lastUpdatedLine(renderedAt),
+		PlotLeft:    svgPlotLeft,
+		PlotRight:   svgPlotRight,
+		PlotBottom:  svgPlotBottom,
 	}
 
 	if len(ds.Rows) == 0 {
@@ -320,12 +331,7 @@ func effectiveBreakdownLimit(limit int) int {
 // separate columns rather than one line of text.
 func buildSVGBreakdown(ds snapshot.MergedDataset, mode config.BreakdownMode, limit int) (rows []svgBreakdownRow, omitted *svgTextLine) {
 	entries := groupBreakdown(ds.Rows, mode)
-	limit = effectiveBreakdownLimit(limit)
-
-	shown, rest := entries, []breakdownEntry(nil)
-	if len(entries) > limit {
-		shown, rest = entries[:limit], entries[limit:]
-	}
+	shown, rest := splitBreakdownEntries(entries, effectiveBreakdownLimit(limit))
 
 	for i, e := range shown {
 		rows = append(rows, svgBreakdownRow{
@@ -339,12 +345,7 @@ func buildSVGBreakdown(ds snapshot.MergedDataset, mode config.BreakdownMode, lim
 	if len(rest) == 0 {
 		return rows, nil
 	}
-	var tokens int64
-	var cost float64
-	for _, e := range rest {
-		tokens += e.Tokens
-		cost += e.Cost
-	}
+	tokens, cost := sumBreakdownEntries(rest)
 	return rows, &svgTextLine{
 		Y:    svgBreakdownFirstRowY + len(shown)*svgBreakdownRowHeight,
 		Text: fmt.Sprintf("… %d more — %s tokens ($%.2f)", len(rest), formatTokens(tokens), cost),
