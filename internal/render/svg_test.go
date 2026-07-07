@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,89 @@ func TestRenderSVG_BreakdownEntry_LongLabelTruncatedWithEllipsis(t *testing.T) {
 	}
 	if !strings.Contains(light, "…") {
 		t.Errorf("RenderSVG() truncated label missing an ellipsis marker:\n%s", light)
+	}
+}
+
+// TestRenderSVG_BreakdownLimit_OversizedPositiveClampsToLayoutBudget covers
+// effectiveBreakdownLimit's other clamp disjunct: an explicit positive limit
+// larger than the SVG layout's row budget must clamp the same way the
+// unlimited (<=0) case does, not just fail to truncate.
+func TestRenderSVG_BreakdownLimit_OversizedPositiveClampsToLayoutBudget(t *testing.T) {
+	ds := manyModelsDataset() // 5 distinct models
+	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, 10, asOf)
+	if err != nil {
+		t.Fatalf("RenderSVG() error = %v", err)
+	}
+
+	for _, model := range []string{"model-a", "model-b", "model-c", "model-d"} {
+		if !strings.Contains(light, model) {
+			t.Errorf("RenderSVG() missing top model %q:\n%s", model, light)
+		}
+	}
+	if strings.Contains(light, "model-e") {
+		t.Errorf("RenderSVG() unexpectedly shows omitted model \"model-e\" individually despite the layout's row budget:\n%s", light)
+	}
+	if !strings.Contains(light, "1 more") {
+		t.Errorf("RenderSVG() missing an omitted-entries summary line (\"1 more\") for a limit exceeding the layout budget:\n%s", light)
+	}
+}
+
+// TestRenderSVG_FlatMultiDayTrend_PointsShareMidpointWithoutOverlap covers
+// buildSVGTrend's span==0 fallback: when every day's total is identical,
+// maxTok-minTok is 0 and every point must fall back to the plot rectangle's
+// fixed midpoint rather than dividing by a zero span or collapsing onto one
+// x coordinate.
+func TestRenderSVG_FlatMultiDayTrend_PointsShareMidpointWithoutOverlap(t *testing.T) {
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-18", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 500, Cost: 5.0},
+		{Date: "2026-06-19", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 500, Cost: 5.0},
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 500, Cost: 5.0},
+	}}
+	asOf := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sum := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	light, _, err := render.RenderSVG(ds, sum, config.BreakdownPerModel, -1, asOf)
+	if err != nil {
+		t.Fatalf("RenderSVG() error = %v", err)
+	}
+
+	const marker = `<polyline points="`
+	idx := strings.Index(light, marker)
+	if idx == -1 {
+		t.Fatalf("RenderSVG() missing a <polyline> element for a 3-day flat trend (want the multi-point branch, not the single-point fallback):\n%s", light)
+	}
+	start := idx + len(marker)
+	end := strings.Index(light[start:], `"`)
+	if end == -1 {
+		t.Fatalf("RenderSVG() polyline points attribute unterminated:\n%s", light)
+	}
+	points := strings.Fields(light[start : start+end])
+	if len(points) != 3 {
+		t.Fatalf("polyline points = %v, want exactly 3 (one per date)", points)
+	}
+
+	seenX := map[string]bool{}
+	var wantY string
+	for i, p := range points {
+		x, y, ok := strings.Cut(p, ",")
+		if !ok {
+			t.Fatalf("point %q not in \"x,y\" form", p)
+		}
+		if seenX[x] {
+			t.Errorf("point %d x=%s collides with an earlier point's x — overlapping coordinates", i, x)
+		}
+		seenX[x] = true
+		if i == 0 {
+			wantY = y
+		} else if y != wantY {
+			t.Errorf("point %d y=%s, want %s (every point should sit at the shared flat-trend midpoint)", i, y, wantY)
+		}
+		if _, err := strconv.Atoi(y); err != nil {
+			t.Errorf("point %d y=%q is not a valid integer coordinate: %v", i, y, err)
+		}
 	}
 }
 
