@@ -30,8 +30,11 @@ func TestRenderSVG_HappyPath_ContainsAllCardBlocks(t *testing.T) {
 	}
 
 	for _, out := range []string{light, dark} {
-		if !strings.HasPrefix(strings.TrimSpace(out), "<svg") {
-			t.Errorf("RenderSVG() output does not start with an <svg> element: %q", firstLine(out))
+		if !strings.HasPrefix(strings.TrimSpace(out), "<?xml") {
+			t.Errorf("RenderSVG() output does not start with an XML declaration: %q", firstLine(out))
+		}
+		if !strings.Contains(out, "<svg ") || !strings.Contains(out, "</svg>") {
+			t.Errorf("RenderSVG() output missing an <svg> element:\n%s", out)
 		}
 		if !strings.Contains(out, "viewBox=") {
 			t.Errorf("RenderSVG() output missing viewBox attribute (needed for responsive scaling):\n%s", out)
@@ -48,8 +51,8 @@ func TestRenderSVG_HappyPath_ContainsAllCardBlocks(t *testing.T) {
 		if !strings.Contains(out, "polyline") {
 			t.Errorf("RenderSVG() output missing a trend polyline:\n%s", out)
 		}
-		if !strings.Contains(out, "Streak: 3 days") {
-			t.Errorf("RenderSVG() output missing streak line:\n%s", out)
+		if !strings.Contains(out, "STREAK") || !strings.Contains(out, "3 days") {
+			t.Errorf("RenderSVG() output missing streak tile:\n%s", out)
 		}
 		for _, model := range []string{"claude-sonnet-5", "gpt-5.4", "claude-opus-5"} {
 			if !strings.Contains(out, model) {
@@ -108,7 +111,7 @@ func TestRenderSVG_EmptyDataset_NoDataYetVariant(t *testing.T) {
 		if strings.Contains(out, "polyline") {
 			t.Errorf("RenderSVG() output unexpectedly contains a trend polyline for an empty dataset:\n%s", out)
 		}
-		if !strings.HasPrefix(strings.TrimSpace(out), "<svg") || !strings.Contains(out, "</svg>") {
+		if !strings.Contains(out, "<svg ") || !strings.Contains(out, "</svg>") {
 			t.Errorf("RenderSVG() output not a well-formed SVG for empty dataset:\n%s", out)
 		}
 	}

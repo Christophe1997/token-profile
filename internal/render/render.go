@@ -182,11 +182,19 @@ func shortDate(date string) string {
 }
 
 func streakLine(sum summary.Summary) string {
+	return fmt.Sprintf("Streak: %s", streakValue(sum.Streak))
+}
+
+// streakValue renders a streak day count without the "Streak: " label, so
+// callers that place it inside their own labeled context (e.g. the SVG
+// card's streak tile) don't have to strip a prefix meant for streakLine's
+// own plain-text line.
+func streakValue(days int) string {
 	unit := "days"
-	if sum.Streak == 1 {
+	if days == 1 {
 		unit = "day"
 	}
-	return fmt.Sprintf("Streak: %d %s", sum.Streak, unit)
+	return fmt.Sprintf("%d %s", days, unit)
 }
 
 // breakdownEntry is one grouped row (by model, agent, or the whole dataset)

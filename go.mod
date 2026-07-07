@@ -3,6 +3,7 @@ module github.com/Christophe1997/token-profile
 go 1.26
 
 require (
+	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b
 	github.com/guptarohit/asciigraph v0.10.0
 	github.com/spf13/cobra v1.10.2
 )

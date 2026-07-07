@@ -3,12 +3,11 @@ package render
 import (
 	"bytes"
 	"fmt"
-	"html"
 	"slices"
-	"strings"
-	"text/template"
 	"time"
 	"unicode/utf8"
+
+	svg "github.com/ajstarks/svgo"
 
 	"github.com/Christophe1997/token-profile/internal/config"
 	"github.com/Christophe1997/token-profile/internal/snapshot"
@@ -21,28 +20,53 @@ import (
 // content-length risk (an unbounded breakdown, an outlier label) is
 // resolved by truncation rather than a bigger canvas (see
 // effectiveBreakdownLimit and truncateLabel).
+//
+// The layout is the "stat-tile dashboard" direction locked in during
+// brainstorming: three stat tiles (tokens/cost/streak) with colored delta
+// badges, a gradient-filled area under the trend line, and bar-style
+// breakdown rows.
 const (
 	svgWidth  = 640
 	svgHeight = 520
 
 	svgMarginX = 32
 
-	svgStatBlockGap = 300
+	svgTileTop     = 68
+	svgTileWidth   = 180
+	svgTileHeight  = 76
+	svgTileGap     = 18
+	svgTileLabelDY = 20 // label baseline, offset from the tile's top edge
+	svgTileValueDY = 46 // value baseline, offset from the tile's top edge
+	svgTileBadgeDY = 54 // badge rect top, offset from the tile's top edge
+	svgTileBadgeH  = 20
+	svgTileBadgeRX = 10
+	svgTilePadX    = 12
+
+	svgTrendHeadingY = 158 // clears the max-axis label at svgPlotTop+4 below it
 
 	svgPlotTop    = 168
 	svgPlotBottom = 288
 	svgPlotLeft   = 90
 	svgPlotRight  = 608
 
-	svgBreakdownFirstRowY  = svgPlotBottom + 96
-	svgBreakdownRowHeight  = 22
-	svgBreakdownRowBudget  = 4 // shown rows; a 5th slot is reserved for the omitted-count summary line
-	svgBreakdownLabelRunes = 22
+	svgBreakdownHeadingY    = svgPlotBottom + 32
+	svgBreakdownFirstRowY   = svgBreakdownHeadingY + 24
+	svgBreakdownRowHeight   = 22
+	svgBreakdownRowBudget   = 4 // shown rows; a 5th slot is reserved for the omitted-count summary line
+	svgBreakdownLabelRunes  = 22
+	svgBreakdownTrackX      = 200
+	svgBreakdownTrackWidth  = 160
+	svgBreakdownTrackHeight = 8
+	svgBreakdownTokensX     = 420
+	svgBreakdownCostX       = 608
+
+	svgFontFamily     = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+	svgAreaGradientID = "areaFill"
 )
 
-// svgPalette is the small set of colors that differ between the light and
-// dark card variants (KTD2) — every other layout detail is one shared
-// template.
+// svgPalette is the small set of colors and theme-specific shape fills that
+// differ between the light and dark card variants (KTD2) — every other
+// layout detail is shared, plain Go drawing code.
 type svgPalette struct {
 	Background string
 	Border     string
@@ -53,6 +77,18 @@ type svgPalette struct {
 	Negative   string
 	Accent     string
 	Grid       string
+
+	TileBackground  string
+	BadgePositiveBg string
+	BadgeNegativeBg string
+	// AreaOpacityTop is the trend area fill gradient's top-stop opacity
+	// (0-1); the bottom stop is always fully transparent.
+	AreaOpacityTop float64
+	BreakdownTrack string
+	// BarColors rotates across breakdown rows by index so adjacent bars are
+	// visually distinct; there are always at least svgBreakdownRowBudget
+	// entries so every shown row gets a color.
+	BarColors []string
 }
 
 var svgLightPalette = svgPalette{
@@ -65,6 +101,13 @@ var svgLightPalette = svgPalette{
 	Negative:   "#cf222e",
 	Accent:     "#0969da",
 	Grid:       "#d8dee4",
+
+	TileBackground:  "#f6f8fa",
+	BadgePositiveBg: "#dafbe1",
+	BadgeNegativeBg: "#ffebe9",
+	AreaOpacityTop:  0.28,
+	BreakdownTrack:  "#eaeef2",
+	BarColors:       []string{"#0969da", "#8250df", "#1b7c83", "#9a6700"},
 }
 
 var svgDarkPalette = svgPalette{
@@ -77,11 +120,18 @@ var svgDarkPalette = svgPalette{
 	Negative:   "#f85149",
 	Accent:     "#58a6ff",
 	Grid:       "#21262d",
+
+	TileBackground:  "#161b22",
+	BadgePositiveBg: "#0d2818",
+	BadgeNegativeBg: "#2d0f0d",
+	AreaOpacityTop:  0.32,
+	BreakdownTrack:  "#21262d",
+	BarColors:       []string{"#58a6ff", "#a371f7", "#39c5cf", "#d29922"},
 }
 
-// svgStat is one headline stat block (tokens or cost), positioned at a
-// fixed X offset so multiple stats lay out side by side.
-type svgStat struct {
+// svgTile is one stat tile (tokens, cost, or streak), positioned at a fixed
+// X offset so the three tiles lay out side by side.
+type svgTile struct {
 	X          int
 	Label      string
 	Value      string
@@ -90,12 +140,16 @@ type svgStat struct {
 }
 
 // svgBreakdownRow is one shown breakdown entry, pre-positioned at its row's
-// fixed Y so the template needs no per-row arithmetic.
+// fixed Y so rendering needs no per-row arithmetic. BarWidth is the
+// foreground bar's pixel width, proportional to the row's tokens relative
+// to the top (largest) shown row; ColorIndex selects BarColors.
 type svgBreakdownRow struct {
-	Y      int
-	Label  string
-	Tokens string
-	Cost   string
+	Y          int
+	Label      string
+	Tokens     string
+	Cost       string
+	BarWidth   int
+	ColorIndex int
 }
 
 // svgTextLine is a single positioned line of text — used for the
@@ -111,40 +165,36 @@ type svgTextLine struct {
 // history but nothing in the current trailing window (distinct from
 // svgCardData.NoData, which covers no history at all); Single covers the
 // degenerate one-data-point case, mirroring trendLines' own single-day
-// branch: a meaningful point/label instead of a one-point polyline.
+// branch: a labeled point instead of a one-point polyline.
 type svgTrend struct {
 	NoData        bool
 	NoDataMessage string
-	Single        bool
-	PointText     string
-	Polyline      string
-	StartLabel    string
-	EndLabel      string
-	MaxLabel      string
-	MinLabel      string
+
+	Single         bool
+	PointX, PointY int
+	PointText      string
+
+	// X/Y are the polyline's plotted coordinates, one pair per date,
+	// already scaled into the plot rectangle. Empty unless NoData/Single
+	// are both false.
+	X, Y                 []int
+	StartLabel, EndLabel string
+	MaxLabel, MinLabel   string
 }
 
-// svgCardData is the template's root data. One value serves both palette
-// variants — RenderSVG swaps Palette and re-executes the same template
-// (KTD2) rather than building two separate data sets.
+// svgCardData is the card's fully computed, palette-independent content —
+// RenderSVG builds it once and renders it twice, swapping only the palette,
+// rather than recomputing text/positions per theme.
 type svgCardData struct {
-	Palette svgPalette
-
 	Width, Height int
 	Title         string
 
-	// PlotLeft/Right/Bottom mirror svgPlotLeft/Right/Bottom (KTD3) so the
-	// trend axis line and labels stay in the same coordinate space as
-	// buildSVGTrend's scaled polyline without repeating the literals.
-	PlotLeft, PlotRight, PlotBottom int
-
 	// NoData covers a brand-new adopter: no history at all, merged or
-	// otherwise. Hides Stats/Streak/Trend/Breakdown behind one message.
+	// otherwise. Hides Tiles/Trend/Breakdown behind one message.
 	NoData        bool
 	NoDataMessage string
 
-	Stats            []svgStat
-	Streak           string
+	Tiles            []svgTile
 	BreakdownHeading string
 	BreakdownRows    []svgBreakdownRow
 	OmittedLine      *svgTextLine
@@ -155,84 +205,6 @@ type svgCardData struct {
 	Trend                  svgTrend
 	LastUpdated            string
 }
-
-// xmlEscape escapes s for safe embedding as SVG text content. text/template
-// (KTD1) does none of html/template's auto-escaping, so any value that
-// ultimately came from external data (a model or agent name) must be
-// escaped by hand before it reaches the template.
-func xmlEscape(s string) string {
-	return html.EscapeString(s)
-}
-
-// svgTemplateSource is the shared card layout (KTD1, KTD2): one
-// text/template drawing fixed-position rects/text/polylines, with only
-// Palette colors and the content fields (Stats, Trend, BreakdownRows, ...)
-// varying between calls. Most coordinates are hardcoded to match the
-// constants above exactly, since they never vary independently of them —
-// see buildSVGCardData and buildSVGTrend for the Go-side math that must
-// stay in sync with these numbers. The trend plot rectangle's own edges
-// (PlotLeft/Right/Bottom) are the one exception, threaded through as data
-// fields rather than repeated literals, since buildSVGTrend's polyline math
-// and the axis/gridline drawn here must never drift apart.
-const svgTemplateSource = `<svg xmlns="http://www.w3.org/2000/svg" width="{{.Width}}" height="{{.Height}}" viewBox="0 0 {{.Width}} {{.Height}}" role="img" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-<title>{{esc .Title}}</title>
-<rect width="100%" height="100%" fill="{{.Palette.Background}}"/>
-<rect x="1" y="1" width="638" height="518" rx="12" fill="none" stroke="{{.Palette.Border}}" stroke-width="2"/>
-<text x="32" y="40" font-size="22" font-weight="600" fill="{{.Palette.Title}}">{{esc .Title}}</text>
-<line x1="32" y1="56" x2="608" y2="56" stroke="{{.Palette.Border}}" stroke-width="1"/>
-{{if .NoData}}
-<text x="320" y="260" font-size="16" fill="{{.Palette.Muted}}" text-anchor="middle">{{esc .NoDataMessage}}</text>
-{{else}}
-{{range .Stats}}
-<text x="{{.X}}" y="84" font-size="12" font-weight="600" letter-spacing="1" fill="{{$.Palette.Muted}}">{{esc .Label}}</text>
-<text x="{{.X}}" y="118" font-size="26" font-weight="700" fill="{{$.Palette.Text}}">{{esc .Value}}{{if .Delta}}<tspan font-size="15" font-weight="600" fill="{{deltaColor $.Palette .DeltaClass}}"> {{esc .Delta}}</tspan>{{end}}</text>
-{{end}}
-<text x="32" y="152" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">TREND</text>
-<line x1="{{.PlotLeft}}" y1="{{.PlotBottom}}" x2="{{.PlotRight}}" y2="{{.PlotBottom}}" stroke="{{.Palette.Grid}}" stroke-width="1"/>
-{{if .Trend.NoData}}
-<text x="349" y="228" font-size="13" fill="{{.Palette.Muted}}" text-anchor="middle">{{esc .Trend.NoDataMessage}}</text>
-{{else if .Trend.Single}}
-<circle cx="349" cy="228" r="5" fill="{{.Palette.Accent}}"/>
-<text x="349" y="208" font-size="13" fill="{{.Palette.Text}}" text-anchor="middle">{{esc .Trend.PointText}}</text>
-{{else}}
-<polyline points="{{.Trend.Polyline}}" fill="none" stroke="{{.Palette.Accent}}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="{{.PlotLeft}}" y="306" font-size="12" fill="{{.Palette.Muted}}">{{esc .Trend.StartLabel}}</text>
-<text x="{{.PlotRight}}" y="306" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.EndLabel}}</text>
-<text x="82" y="172" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.MaxLabel}}</text>
-<text x="82" y="{{.PlotBottom}}" font-size="12" fill="{{.Palette.Muted}}" text-anchor="end">{{esc .Trend.MinLabel}}</text>
-{{end}}
-<text x="32" y="328" font-size="16" font-weight="600" fill="{{.Palette.Text}}">{{esc .Streak}}</text>
-<text x="32" y="360" font-size="12" font-weight="600" letter-spacing="1" fill="{{.Palette.Muted}}">{{esc .BreakdownHeading}}</text>
-{{if .BreakdownNoDataMessage}}
-<text x="32" y="384" font-size="13" fill="{{.Palette.Muted}}">{{esc .BreakdownNoDataMessage}}</text>
-{{else}}
-{{range .BreakdownRows}}
-<text x="32" y="{{.Y}}" font-size="13" fill="{{$.Palette.Text}}">{{esc .Label}}</text>
-<text x="420" y="{{.Y}}" font-size="13" fill="{{$.Palette.Muted}}" text-anchor="end">{{esc .Tokens}}</text>
-<text x="608" y="{{.Y}}" font-size="13" fill="{{$.Palette.Muted}}" text-anchor="end">{{esc .Cost}}</text>
-{{end}}
-{{with .OmittedLine}}
-<text x="32" y="{{.Y}}" font-size="13" fill="{{$.Palette.Muted}}">{{esc .Text}}</text>
-{{end}}
-{{end}}
-{{end}}
-<text x="32" y="504" font-size="11" fill="{{.Palette.Muted}}">{{esc .LastUpdated}}</text>
-</svg>
-`
-
-var svgTemplate = template.Must(template.New("dashboard-card").Funcs(template.FuncMap{
-	"esc": xmlEscape,
-	"deltaColor": func(p svgPalette, class string) string {
-		switch class {
-		case "positive":
-			return p.Positive
-		case "negative":
-			return p.Negative
-		default:
-			return p.Muted
-		}
-	},
-}).Parse(svgTemplateSource))
 
 // noWindowDataMessage covers a user with real merged history but zero rows
 // in the current trailing window (e.g. inactive for longer than the
@@ -254,20 +226,7 @@ const noWindowDataMessage = "No usage in this window."
 // substituting a window-scoped no-data message.
 func RenderSVG(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) (light, dark string, err error) {
 	data := buildSVGCardData(ds, hasHistory, sum, mode, breakdownLimit, renderedAt)
-
-	data.Palette = svgLightPalette
-	var lightBuf bytes.Buffer
-	if err := svgTemplate.Execute(&lightBuf, data); err != nil {
-		return "", "", fmt.Errorf("rendering light SVG card: %w", err)
-	}
-
-	data.Palette = svgDarkPalette
-	var darkBuf bytes.Buffer
-	if err := svgTemplate.Execute(&darkBuf, data); err != nil {
-		return "", "", fmt.Errorf("rendering dark SVG card: %w", err)
-	}
-
-	return lightBuf.String(), darkBuf.String(), nil
+	return renderSVGCard(data, svgLightPalette), renderSVGCard(data, svgDarkPalette), nil
 }
 
 // AltText renders ds/sum's headline stats as one plain-text sentence (R8),
@@ -288,9 +247,6 @@ func buildSVGCardData(ds snapshot.MergedDataset, hasHistory bool, sum summary.Su
 		Height:      svgHeight,
 		Title:       titleLine(ds),
 		LastUpdated: lastUpdatedLine(renderedAt),
-		PlotLeft:    svgPlotLeft,
-		PlotRight:   svgPlotRight,
-		PlotBottom:  svgPlotBottom,
 	}
 
 	if !hasHistory {
@@ -299,19 +255,22 @@ func buildSVGCardData(ds snapshot.MergedDataset, hasHistory bool, sum summary.Su
 		return data
 	}
 
-	data.Stats = []svgStat{
+	data.Tiles = []svgTile{
 		{
-			X: svgMarginX, Label: "TOKENS",
+			X: svgTileX(0), Label: "TOKENS",
 			Value: formatTokens(sum.TotalTokens),
 			Delta: deltaText(sum.TokenChangePct), DeltaClass: deltaClass(sum.TokenChangePct),
 		},
 		{
-			X: svgMarginX + svgStatBlockGap, Label: "COST",
+			X: svgTileX(1), Label: "COST",
 			Value: fmt.Sprintf("$%.2f", sum.TotalCost),
 			Delta: deltaText(sum.CostChangePct), DeltaClass: deltaClass(sum.CostChangePct),
 		},
+		{
+			X: svgTileX(2), Label: "STREAK",
+			Value: streakTileValue(sum.Streak),
+		},
 	}
-	data.Streak = streakLine(sum)
 	data.BreakdownHeading = breakdownHeading(mode)
 
 	if len(ds.Rows) == 0 {
@@ -322,6 +281,24 @@ func buildSVGCardData(ds snapshot.MergedDataset, hasHistory bool, sum summary.Su
 	data.BreakdownRows, data.OmittedLine = buildSVGBreakdown(ds, mode, breakdownLimit)
 	data.Trend = buildSVGTrend(ds)
 	return data
+}
+
+// svgTileX returns the fixed X offset of the index'th stat tile (0-2), the
+// three tiles evenly filling the space between svgMarginX and svgPlotRight.
+func svgTileX(index int) int {
+	return svgMarginX + index*(svgTileWidth+svgTileGap)
+}
+
+// streakTileValue renders the streak tile's value, appending a fire emoji
+// once a streak is actually underway — a low-cost bit of the "stat-tile
+// dashboard" mockup's visual flavor, skipped at zero so an idle card
+// doesn't celebrate nothing.
+func streakTileValue(days int) string {
+	v := streakValue(days)
+	if days > 0 {
+		v += " \U0001F525"
+	}
+	return v
 }
 
 func deltaText(pct *float64) string {
@@ -360,18 +337,30 @@ func effectiveBreakdownLimit(limit int) int {
 // KTD4) and splits it into up to effectiveBreakdownLimit shown rows plus
 // one folded omitted-entries summary line, mirroring breakdownLines' own
 // shown/omitted split but producing per-column fields (Label/Tokens/Cost)
-// instead of one preformatted string, since the SVG lays them out in
-// separate columns rather than one line of text.
+// plus a proportional bar width, since the SVG draws a bar-style row rather
+// than one line of text. BarWidth is scaled relative to the top (largest,
+// since entries are sorted descending) shown row's tokens.
 func buildSVGBreakdown(ds snapshot.MergedDataset, mode config.BreakdownMode, limit int) (rows []svgBreakdownRow, omitted *svgTextLine) {
 	entries := groupBreakdown(ds.Rows, mode)
 	shown, rest := splitBreakdownEntries(entries, effectiveBreakdownLimit(limit))
 
+	var maxTokens int64
+	if len(shown) > 0 {
+		maxTokens = shown[0].Tokens
+	}
+
 	for i, e := range shown {
+		var barWidth int
+		if maxTokens > 0 {
+			barWidth = int(float64(svgBreakdownTrackWidth) * float64(e.Tokens) / float64(maxTokens))
+		}
 		rows = append(rows, svgBreakdownRow{
-			Y:      svgBreakdownFirstRowY + i*svgBreakdownRowHeight,
-			Label:  truncateLabel(e.Label, svgBreakdownLabelRunes),
-			Tokens: formatTokens(e.Tokens),
-			Cost:   fmt.Sprintf("$%.2f", e.Cost),
+			Y:          svgBreakdownFirstRowY + i*svgBreakdownRowHeight,
+			Label:      truncateLabel(e.Label, svgBreakdownLabelRunes),
+			Tokens:     formatTokens(e.Tokens),
+			Cost:       fmt.Sprintf("$%.2f", e.Cost),
+			BarWidth:   barWidth,
+			ColorIndex: i,
 		})
 	}
 
@@ -407,6 +396,8 @@ func buildSVGTrend(ds snapshot.MergedDataset) svgTrend {
 	if len(dates) == 1 {
 		return svgTrend{
 			Single:    true,
+			PointX:    (svgPlotLeft + svgPlotRight) / 2,
+			PointY:    (svgPlotTop + svgPlotBottom) / 2,
 			PointText: fmt.Sprintf("%s: %s tokens", shortDate(dates[0]), formatTokens(int64(tokens[0]))),
 		}
 	}
@@ -414,25 +405,219 @@ func buildSVGTrend(ds snapshot.MergedDataset) svgTrend {
 	minTok, maxTok := slices.Min(tokens), slices.Max(tokens)
 	span := maxTok - minTok
 
-	var points strings.Builder
+	x := make([]int, len(dates))
+	y := make([]int, len(dates))
 	xStep := float64(svgPlotRight-svgPlotLeft) / float64(len(dates)-1)
 	for i, v := range tokens {
-		x := svgPlotLeft + int(float64(i)*xStep)
-		y := (svgPlotTop + svgPlotBottom) / 2
+		x[i] = svgPlotLeft + int(float64(i)*xStep)
+		y[i] = (svgPlotTop + svgPlotBottom) / 2
 		if span > 0 {
-			y = svgPlotBottom - int((v-minTok)/span*float64(svgPlotBottom-svgPlotTop))
+			y[i] = svgPlotBottom - int((v-minTok)/span*float64(svgPlotBottom-svgPlotTop))
 		}
-		if i > 0 {
-			points.WriteByte(' ')
-		}
-		fmt.Fprintf(&points, "%d,%d", x, y)
 	}
 
 	return svgTrend{
-		Polyline:   points.String(),
+		X: x, Y: y,
 		StartLabel: shortDate(dates[0]),
 		EndLabel:   shortDate(dates[len(dates)-1]),
 		MaxLabel:   formatTokens(int64(maxTok)),
 		MinLabel:   formatTokens(int64(minTok)),
+	}
+}
+
+// renderSVGCard draws data with palette's colors using svgo's programmatic
+// API and returns the finished document as a string.
+func renderSVGCard(data svgCardData, palette svgPalette) string {
+	var buf bytes.Buffer
+	canvas := svg.New(&buf)
+	canvas.Start(data.Width, data.Height,
+		fmt.Sprintf(`viewBox="0 0 %d %d"`, data.Width, data.Height),
+		`role="img"`,
+		fmt.Sprintf(`font-family="%s"`, svgFontFamily),
+	)
+	canvas.Title(data.Title)
+	canvas.Rect(0, 0, data.Width, data.Height, fmt.Sprintf(`fill="%s"`, palette.Background))
+	canvas.Roundrect(1, 1, data.Width-2, data.Height-2, 12, 12,
+		`fill="none"`, fmt.Sprintf(`stroke="%s"`, palette.Border), `stroke-width="2"`)
+	canvas.Text(svgMarginX, 40, data.Title, textAttrs(22, 600, palette.Title)...)
+	canvas.Line(svgMarginX, 56, svgPlotRight, 56,
+		fmt.Sprintf(`stroke="%s"`, palette.Border), `stroke-width="1"`)
+
+	if data.NoData {
+		canvas.Text(data.Width/2, 260, data.NoDataMessage,
+			textAttrs(16, 0, palette.Muted, `text-anchor="middle"`)...)
+		canvas.End()
+		return buf.String()
+	}
+
+	renderTiles(canvas, data.Tiles, palette)
+	renderTrend(canvas, data.Trend, palette)
+	renderBreakdown(canvas, data, palette)
+
+	canvas.Text(svgMarginX, 504, data.LastUpdated, textAttrs(11, 0, palette.Muted)...)
+	canvas.End()
+	return buf.String()
+}
+
+// textAttrs builds the raw SVG presentation attributes svgo's Text/Span
+// accept for a text run — font-size, fill, an optional font-weight, plus
+// any extra attributes (e.g. text-anchor, letter-spacing) verbatim. Each
+// returned string contains "=", so svgo passes it through unmodified
+// rather than wrapping it as a single style="..." attribute.
+func textAttrs(size, weight int, fill string, extra ...string) []string {
+	attrs := []string{fmt.Sprintf(`font-size="%d"`, size), fmt.Sprintf(`fill="%s"`, fill)}
+	if weight > 0 {
+		attrs = append(attrs, fmt.Sprintf(`font-weight="%d"`, weight))
+	}
+	return append(attrs, extra...)
+}
+
+// renderTiles draws the stat-tile row: a rounded-rect background, label,
+// bold value, and — when the tile carries a window-over-window delta — a
+// colored pill badge stacked below the value. The badge sits on its own
+// line (rather than inline after the value, as the earlier plain-text
+// design did) because SVG has no text-measurement primitive: an inline
+// badge would need to know the value text's rendered width to avoid
+// overlapping it, which isn't available without real font metrics.
+func renderTiles(canvas *svg.SVG, tiles []svgTile, palette svgPalette) {
+	for _, tile := range tiles {
+		canvas.Roundrect(tile.X, svgTileTop, svgTileWidth, svgTileHeight, 8, 8,
+			fmt.Sprintf(`fill="%s"`, palette.TileBackground))
+
+		labelX := tile.X + svgTilePadX
+		canvas.Text(labelX, svgTileTop+svgTileLabelDY, tile.Label,
+			textAttrs(11, 600, palette.Muted, `letter-spacing="1"`)...)
+		canvas.Text(labelX, svgTileTop+svgTileValueDY, tile.Value,
+			textAttrs(22, 700, palette.Text)...)
+
+		if tile.Delta == "" {
+			continue
+		}
+		badgeBg, badgeFg := badgeColors(palette, tile.DeltaClass)
+		badgeWidth := deltaBadgeWidth(tile.Delta)
+		badgeX := tile.X + svgTileWidth - svgTilePadX - badgeWidth
+		badgeY := svgTileTop + svgTileBadgeDY
+		canvas.Roundrect(badgeX, badgeY, badgeWidth, svgTileBadgeH, svgTileBadgeRX, svgTileBadgeRX,
+			fmt.Sprintf(`fill="%s"`, badgeBg))
+		canvas.Text(badgeX+8, badgeY+14, tile.Delta, textAttrs(10, 600, badgeFg)...)
+	}
+}
+
+// badgeColors picks a delta badge's background/foreground colors for
+// class ("positive", "negative", or "" — an exact-zero delta, which
+// deltaText still renders as "+0%"). The neutral case reuses the
+// breakdown row track color as its background rather than adding a third
+// badge-background palette field for one edge case.
+func badgeColors(palette svgPalette, class string) (bg, fg string) {
+	switch class {
+	case "positive":
+		return palette.BadgePositiveBg, palette.Positive
+	case "negative":
+		return palette.BadgeNegativeBg, palette.Negative
+	default:
+		return palette.BreakdownTrack, palette.Muted
+	}
+}
+
+// deltaBadgeWidth estimates a delta badge's pixel width from its character
+// count. SVG has no text-measurement primitive, but a delta's character
+// set (digits, +/-, %) is narrow enough that a fixed per-character
+// estimate at the badge's 10px font keeps the pill snug without real font
+// metrics.
+func deltaBadgeWidth(text string) int {
+	const paddingX = 8
+	const avgCharWidth = 7
+	return paddingX*2 + utf8.RuneCountInString(text)*avgCharWidth
+}
+
+// renderTrend draws the "TREND" heading, the plot's baseline, and either
+// the no-window-data message, a single labeled point, or a gradient-filled
+// area plus polyline for a real multi-day series.
+func renderTrend(canvas *svg.SVG, trend svgTrend, palette svgPalette) {
+	canvas.Text(svgMarginX, svgTrendHeadingY, "TREND", textAttrs(12, 600, palette.Muted, `letter-spacing="1"`)...)
+	canvas.Line(svgPlotLeft, svgPlotBottom, svgPlotRight, svgPlotBottom,
+		fmt.Sprintf(`stroke="%s"`, palette.Grid), `stroke-width="1"`)
+
+	switch {
+	case trend.NoData:
+		canvas.Text((svgPlotLeft+svgPlotRight)/2, (svgPlotTop+svgPlotBottom)/2, trend.NoDataMessage,
+			textAttrs(13, 0, palette.Muted, `text-anchor="middle"`)...)
+	case trend.Single:
+		canvas.Circle(trend.PointX, trend.PointY, 5, fmt.Sprintf(`fill="%s"`, palette.Accent))
+		canvas.Text(trend.PointX, trend.PointY-20, trend.PointText,
+			textAttrs(13, 0, palette.Text, `text-anchor="middle"`)...)
+	default:
+		canvas.Def()
+		canvas.LinearGradient(svgAreaGradientID, 0, 0, 0, 100, []svg.Offcolor{
+			{Offset: 0, Color: palette.Accent, Opacity: palette.AreaOpacityTop},
+			{Offset: 100, Color: palette.Accent, Opacity: 0},
+		})
+		canvas.DefEnd()
+
+		areaX, areaY := areaPolygonPoints(trend.X, trend.Y, svgPlotBottom)
+		canvas.Polygon(areaX, areaY, fmt.Sprintf(`fill="url(#%s)"`, svgAreaGradientID))
+		canvas.Polyline(trend.X, trend.Y,
+			`fill="none"`, fmt.Sprintf(`stroke="%s"`, palette.Accent), `stroke-width="3"`,
+			`stroke-linecap="round"`, `stroke-linejoin="round"`)
+
+		canvas.Text(svgPlotLeft, 306, trend.StartLabel, textAttrs(12, 0, palette.Muted)...)
+		canvas.Text(svgPlotRight, 306, trend.EndLabel,
+			textAttrs(12, 0, palette.Muted, `text-anchor="end"`)...)
+		canvas.Text(svgPlotLeft-8, svgPlotTop+4, trend.MaxLabel,
+			textAttrs(12, 0, palette.Muted, `text-anchor="end"`)...)
+		canvas.Text(svgPlotLeft-8, svgPlotBottom, trend.MinLabel,
+			textAttrs(12, 0, palette.Muted, `text-anchor="end"`)...)
+	}
+}
+
+// areaPolygonPoints closes trend line points (x, y) into a fillable
+// polygon by dropping straight down from the last point to baseline, then
+// back along baseline to below the first point — SVG implicitly closes
+// the remaining edge back to (x[0], y[0]).
+func areaPolygonPoints(x, y []int, baseline int) (px, py []int) {
+	n := len(x)
+	px = make([]int, n+2)
+	py = make([]int, n+2)
+	copy(px, x)
+	copy(py, y)
+	px[n], px[n+1] = x[n-1], x[0]
+	py[n], py[n+1] = baseline, baseline
+	return px, py
+}
+
+// renderBreakdown draws the breakdown heading and either the
+// window-scoped no-data message or one bar-style row per shown entry (a
+// background track plus a proportional foreground bar, rotating through
+// palette.BarColors) followed by the omitted-entries summary line, if any.
+func renderBreakdown(canvas *svg.SVG, data svgCardData, palette svgPalette) {
+	canvas.Text(svgMarginX, svgBreakdownHeadingY, data.BreakdownHeading,
+		textAttrs(12, 600, palette.Muted, `letter-spacing="1"`)...)
+
+	if data.BreakdownNoDataMessage != "" {
+		canvas.Text(svgMarginX, svgBreakdownFirstRowY, data.BreakdownNoDataMessage,
+			textAttrs(13, 0, palette.Muted)...)
+		return
+	}
+
+	for _, row := range data.BreakdownRows {
+		canvas.Text(svgMarginX, row.Y, row.Label, textAttrs(13, 0, palette.Text)...)
+
+		trackY := row.Y - svgBreakdownTrackHeight - 1
+		canvas.Roundrect(svgBreakdownTrackX, trackY, svgBreakdownTrackWidth, svgBreakdownTrackHeight, 4, 4,
+			fmt.Sprintf(`fill="%s"`, palette.BreakdownTrack))
+		if row.BarWidth > 0 {
+			barColor := palette.BarColors[row.ColorIndex%len(palette.BarColors)]
+			canvas.Roundrect(svgBreakdownTrackX, trackY, row.BarWidth, svgBreakdownTrackHeight, 4, 4,
+				fmt.Sprintf(`fill="%s"`, barColor))
+		}
+
+		canvas.Text(svgBreakdownTokensX, row.Y, row.Tokens,
+			textAttrs(13, 0, palette.Muted, `text-anchor="end"`)...)
+		canvas.Text(svgBreakdownCostX, row.Y, row.Cost,
+			textAttrs(13, 0, palette.Muted, `text-anchor="end"`)...)
+	}
+
+	if data.OmittedLine != nil {
+		canvas.Text(svgMarginX, data.OmittedLine.Y, data.OmittedLine.Text, textAttrs(13, 0, palette.Muted)...)
 	}
 }
