@@ -59,6 +59,72 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	return nil
 }
 
+// runGitOutput runs `git <args...>` in dir like runGit, but also returns its
+// captured stdout, for subcommands whose result is a data line (e.g. `diff
+// --name-only`) rather than just an exit code.
+func runGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", &ExitError{Args: args, Err: err, Stderr: stderr.String()}
+	}
+	return stdout.String(), nil
+}
+
+// resolveRebaseConflict attempts to recover from a `git rebase` invocation
+// that stopped on a conflict, when every conflicting path is in
+// autoResolvePaths. It keeps each conflicting path's replayed-commit
+// version — `git checkout --theirs`, since rebase's ours/theirs convention
+// is the reverse of merge's: "ours" is HEAD, the branch being rebased onto
+// (upstream), and "theirs" is the commit being replayed (the local change)
+// — stages it, and continues the rebase.
+//
+// Returns a non-nil error, leaving the rebase in progress for the caller's
+// existing abort path, if any conflicting path falls outside
+// autoResolvePaths (so a real conflict on authored content is never
+// silently papered over) or if the resolve-and-continue sequence itself
+// fails.
+func resolveRebaseConflict(ctx context.Context, repoDir string, autoResolvePaths []string) error {
+	if len(autoResolvePaths) == 0 {
+		return errors.New("no auto-resolvable paths configured for this conflict")
+	}
+
+	out, err := runGitOutput(ctx, repoDir, "diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		return fmt.Errorf("listing conflicted paths: %w", err)
+	}
+	conflicted := strings.Fields(out)
+	if len(conflicted) == 0 {
+		return errors.New("rebase failed but no conflicted paths were found")
+	}
+
+	allowed := make(map[string]bool, len(autoResolvePaths))
+	for _, p := range autoResolvePaths {
+		allowed[p] = true
+	}
+	for _, p := range conflicted {
+		if !allowed[p] {
+			return fmt.Errorf("conflict on %s is outside the auto-resolvable set", p)
+		}
+	}
+
+	for _, p := range conflicted {
+		if err := runGit(ctx, repoDir, "checkout", "--theirs", p); err != nil {
+			return fmt.Errorf("resolving %s to the local commit's version: %w", p, err)
+		}
+		if err := runGit(ctx, repoDir, "add", p); err != nil {
+			return fmt.Errorf("staging resolved %s: %w", p, err)
+		}
+	}
+	if err := runGit(ctx, repoDir, "rebase", "--continue"); err != nil {
+		return fmt.Errorf("continuing rebase after auto-resolving conflicts: %w", err)
+	}
+	return nil
+}
+
 // Regenerate re-derives and rewrites any content that depends on the
 // current merged repo state (e.g. re-running merge+render+inject after a
 // rebase pulled in new remote data), then returns so Publish can re-stage
@@ -84,12 +150,24 @@ type Regenerate func() error
 // Publish performs no such step (matching its behavior before this
 // parameter existed).
 //
+// The rebase step itself can conflict, when two machines' commits touch the
+// same line of the same file — ordinarily unrecoverable without manual
+// intervention. autoResolvePaths names paths where that's not true: fully
+// regenerated (not authored) content whose pre-rebase diff carries no
+// information worth preserving, since regenerate immediately overwrites it
+// with the real post-rebase-merged data anyway. When every conflicting path
+// is in autoResolvePaths, Publish resolves the conflict by keeping the
+// replayed commit's version of each and continues the rebase; a conflict
+// touching any other path still aborts, exactly as before. autoResolvePaths
+// may be nil, in which case any rebase conflict aborts (matching Publish's
+// behavior before this parameter existed).
+//
 // If every attempt is exhausted, or the push fails for a reason that isn't a
 // non-fast-forward rejection (e.g. no remote configured, auth failure),
 // Publish returns a descriptive error. In all such cases the local commit
 // created here is left intact — Publish never resets or rolls it back — so
 // no work is lost even when the push itself never lands.
-func Publish(ctx context.Context, repoDir string, files []string, commitMessage string, regenerate Regenerate) error {
+func Publish(ctx context.Context, repoDir string, files []string, commitMessage string, regenerate Regenerate, autoResolvePaths []string) error {
 	if len(files) == 0 {
 		return errors.New("gitops: Publish requires at least one file to stage")
 	}
@@ -128,16 +206,18 @@ func Publish(ctx context.Context, repoDir string, files []string, commitMessage 
 			return fmt.Errorf("fetching before retrying push: %w (local commit preserved)", err)
 		}
 		if err := runGit(ctx, repoDir, "rebase", "@{u}"); err != nil {
-			if abortErr := runGit(ctx, repoDir, "rebase", "--abort"); abortErr != nil {
+			if resolveErr := resolveRebaseConflict(ctx, repoDir, autoResolvePaths); resolveErr != nil {
+				if abortErr := runGit(ctx, repoDir, "rebase", "--abort"); abortErr != nil {
+					return fmt.Errorf(
+						"rebasing before retrying push: %w; additionally failed to abort the rebase: %v (repo may be left mid-rebase; resolve manually, the local commit is still present in the rebase todo)",
+						err, abortErr,
+					)
+				}
 				return fmt.Errorf(
-					"rebasing before retrying push: %w; additionally failed to abort the rebase: %v (repo may be left mid-rebase; resolve manually, the local commit is still present in the rebase todo)",
-					err, abortErr,
+					"rebasing before retrying push: %w (rebase aborted; local commit preserved on the branch, resolve the conflict manually and retry)",
+					err,
 				)
 			}
-			return fmt.Errorf(
-				"rebasing before retrying push: %w (rebase aborted; local commit preserved on the branch, resolve the conflict manually and retry)",
-				err,
-			)
 		}
 
 		if regenerate != nil {

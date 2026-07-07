@@ -131,8 +131,14 @@ func run(ctx context.Context, deps RunDeps) error {
 	}
 
 	files := []string{snapshotRelPath(deps.MachineID), readmeFile}
+	// svgFiles is also passed to gitops.Publish as its auto-resolve set: the
+	// two are always regenerated together, so a rebase conflict confined to
+	// them carries no information worth a manual resolution (see
+	// gitops.Publish's autoResolvePaths doc).
+	var svgFiles []string
 	if resolveRenderMode(deps.Config.RenderMode) != config.RenderModeASCII {
-		files = append(files, svgLightRelPath, svgDarkRelPath)
+		svgFiles = []string{svgLightRelPath, svgDarkRelPath}
+		files = append(files, svgFiles...)
 	}
 	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
 
@@ -143,7 +149,7 @@ func run(ctx context.Context, deps RunDeps) error {
 	regenerate := func() error {
 		return mergeRenderInject(deps)
 	}
-	if err := gitops.Publish(ctx, deps.RepoDir, files, commitMessage, regenerate); err != nil {
+	if err := gitops.Publish(ctx, deps.RepoDir, files, commitMessage, regenerate, svgFiles); err != nil {
 		return fmt.Errorf("publishing: %w", err)
 	}
 

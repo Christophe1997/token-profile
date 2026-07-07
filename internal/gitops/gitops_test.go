@@ -124,7 +124,7 @@ func TestPublish_NoContention_CommitsAndPushes(t *testing.T) {
 	solo := cloneWorkdir(t, remote, "solo")
 	writeFile(t, solo, "solo.txt", "hello from solo\n")
 
-	if err := Publish(t.Context(), solo, []string{"solo.txt"}, "add solo file", nil); err != nil {
+	if err := Publish(t.Context(), solo, []string{"solo.txt"}, "add solo file", nil, nil); err != nil {
 		t.Fatalf("Publish() error = %v, want nil", err)
 	}
 
@@ -147,7 +147,7 @@ func TestPublish_ConcurrentPush_RetriesAndSucceeds(t *testing.T) {
 
 	// Machine A commits and pushes first: no contention, succeeds immediately.
 	writeFile(t, machineA, "a-file.txt", "a change\n")
-	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil, nil); err != nil {
 		t.Fatalf("Publish() on machineA error = %v, want nil", err)
 	}
 
@@ -155,7 +155,7 @@ func TestPublish_ConcurrentPush_RetriesAndSucceeds(t *testing.T) {
 	// should be rejected (non-fast-forward); Publish's retry loop must
 	// fetch, rebase onto A's commit, and succeed on the retried push.
 	writeFile(t, machineB, "b-file.txt", "b change\n")
-	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil); err != nil {
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil, nil); err != nil {
 		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
 	}
 
@@ -203,7 +203,7 @@ func TestPublish_RegenerateCalledAfterRebase_ReflectsInFinalPush(t *testing.T) {
 	machineB := cloneWorkdir(t, remote, "machineB")
 
 	writeFile(t, machineA, "a-file.txt", "a change\n")
-	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil, nil); err != nil {
 		t.Fatalf("Publish() on machineA error = %v, want nil", err)
 	}
 
@@ -217,7 +217,7 @@ func TestPublish_RegenerateCalledAfterRebase_ReflectsInFinalPush(t *testing.T) {
 		regenerateCalls++
 		return os.WriteFile(filepath.Join(machineB, "b-file.txt"), []byte("b change (regenerated)\n"), 0o644)
 	}
-	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", regenerate); err != nil {
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", regenerate, nil); err != nil {
 		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
 	}
 	if regenerateCalls != 1 {
@@ -253,12 +253,12 @@ func TestPublish_NilRegenerate_BehavesAsBefore(t *testing.T) {
 	machineB := cloneWorkdir(t, remote, "machineB")
 
 	writeFile(t, machineA, "a-file.txt", "a change\n")
-	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil); err != nil {
+	if err := Publish(t.Context(), machineA, []string{"a-file.txt"}, "a change", nil, nil); err != nil {
 		t.Fatalf("Publish() on machineA error = %v, want nil", err)
 	}
 
 	writeFile(t, machineB, "b-file.txt", "b change\n")
-	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil); err != nil {
+	if err := Publish(t.Context(), machineB, []string{"b-file.txt"}, "b change", nil, nil); err != nil {
 		t.Fatalf("Publish() on machineB error = %v, want nil (should retry past the rejected push)", err)
 	}
 
@@ -285,7 +285,7 @@ func TestPublish_RetriesExhausted_PreservesLocalCommit(t *testing.T) {
 	installAlwaysRejectingHook(t, remote)
 	writeFile(t, work, "work-file.txt", "work change\n")
 
-	err := Publish(t.Context(), work, []string{"work-file.txt"}, "work change", nil)
+	err := Publish(t.Context(), work, []string{"work-file.txt"}, "work change", nil, nil)
 	if err == nil {
 		t.Fatal("Publish() error = nil, want an error after exhausting retries")
 	}
@@ -301,5 +301,99 @@ func TestPublish_RetriesExhausted_PreservesLocalCommit(t *testing.T) {
 	status := runGitT(t, work, "status", "--porcelain")
 	if status != "" {
 		t.Errorf("git status --porcelain = %q, want empty (working tree clean, commit intact)", status)
+	}
+}
+
+// TestPublish_ConflictOnAutoResolvePath_KeepsLocalThenRegenerates covers the
+// case a plain fetch+rebase can't recover from on its own: both machines'
+// commits touch the exact same line of a regenerated (not authored) file,
+// so `git rebase` itself reports a merge conflict before regenerate ever
+// runs. autoResolvePaths must let Publish push through this by keeping the
+// replayed (local) commit's version of just that file and continuing the
+// rebase, then letting regenerate produce the real post-rebase content —
+// never falling back to the abort-and-report path for a conflict entirely
+// within the auto-resolvable set.
+func TestPublish_ConflictOnAutoResolvePath_KeepsLocalThenRegenerates(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote)
+	seedDir := cloneWorkdir(t, remote, "seed-card")
+	writeFile(t, seedDir, "card.svg", "base\n")
+	runGitT(t, seedDir, "add", "card.svg")
+	runGitT(t, seedDir, "commit", "-q", "-m", "seed card.svg")
+	runGitT(t, seedDir, "push", "-q")
+
+	machineA := cloneWorkdir(t, remote, "machineA")
+	machineB := cloneWorkdir(t, remote, "machineB")
+
+	writeFile(t, machineA, "card.svg", "machine-a-content\n")
+	if err := Publish(t.Context(), machineA, []string{"card.svg"}, "a regenerates card.svg", nil, nil); err != nil {
+		t.Fatalf("Publish() on machineA error = %v, want nil", err)
+	}
+
+	// machineB's clone is still on the seed commit, so its own change to
+	// the same line conflicts with machineA's when the rebase replays it.
+	writeFile(t, machineB, "card.svg", "machine-b-content (stale)\n")
+	regenerateCalls := 0
+	regenerate := func() error {
+		regenerateCalls++
+		return os.WriteFile(filepath.Join(machineB, "card.svg"), []byte("machine-b-content (regenerated)\n"), 0o644)
+	}
+	err := Publish(t.Context(), machineB, []string{"card.svg"}, "b regenerates card.svg", regenerate, []string{"card.svg"})
+	if err != nil {
+		t.Fatalf("Publish() on machineB error = %v, want nil (conflict on an auto-resolvable path must not abort)", err)
+	}
+	if regenerateCalls != 1 {
+		t.Errorf("regenerate called %d times, want exactly 1", regenerateCalls)
+	}
+
+	status := runGitT(t, machineB, "status", "--porcelain")
+	if status != "" {
+		t.Errorf("git status --porcelain = %q, want empty (no rebase left in progress)", status)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-card")
+	got, err := os.ReadFile(filepath.Join(verify, "card.svg"))
+	if err != nil {
+		t.Fatalf("ReadFile(card.svg) error = %v", err)
+	}
+	if string(got) != "machine-b-content (regenerated)\n" {
+		t.Errorf("pushed card.svg = %q, want the regenerated content", got)
+	}
+}
+
+// TestPublish_ConflictOutsideAutoResolvePaths_StillAborts covers the safety
+// net: a rebase conflict touching a path NOT in autoResolvePaths must still
+// abort and report an error exactly as before, even when autoResolvePaths
+// is non-empty for a different, unrelated path. Auto-resolution must never
+// silently paper over a conflict on real, authored content.
+func TestPublish_ConflictOutsideAutoResolvePaths_StillAborts(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote)
+
+	machineA := cloneWorkdir(t, remote, "machineA")
+	machineB := cloneWorkdir(t, remote, "machineB")
+
+	writeFile(t, machineA, "README.md", "machine-a-edit\n")
+	if err := Publish(t.Context(), machineA, []string{"README.md"}, "a edits README", nil, []string{"card.svg"}); err != nil {
+		t.Fatalf("Publish() on machineA error = %v, want nil", err)
+	}
+
+	writeFile(t, machineB, "README.md", "machine-b-edit (conflicting)\n")
+	err := Publish(t.Context(), machineB, []string{"README.md"}, "b edits README", nil, []string{"card.svg"})
+	if err == nil {
+		t.Fatal("Publish() error = nil, want an error: the conflict is on README.md, not in autoResolvePaths")
+	}
+
+	log := runGitT(t, machineB, "log", "--oneline")
+	if !strings.Contains(log, "b edits README") {
+		t.Errorf("git log = %q, want it to still contain the local commit (no data loss)", log)
+	}
+
+	rebaseInProgress := false
+	if _, statErr := os.Stat(filepath.Join(machineB, ".git", "rebase-merge")); statErr == nil {
+		rebaseInProgress = true
+	}
+	if rebaseInProgress {
+		t.Error("a rebase is still in progress, want it aborted so the repo is left in a clean, resolvable state")
 	}
 }
