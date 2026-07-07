@@ -99,6 +99,103 @@ func TestRun_OutOfEnumRenderMode_FilesAndRenderBranchAgree(t *testing.T) {
 	}
 }
 
+// TestRun_SVGMode_MultiMachineMerge_RaceDuringRetry is the SVG-mode
+// counterpart of TestRun_MultiMachineMerge_RaceDuringRetry (code review
+// F1's testing gap): the only pre-existing race test was pinned to ASCII
+// mode, leaving the new default's regenerate-after-rebase behavior — and
+// specifically a rebase conflict landing ON the regenerated SVG files
+// themselves, which gitops.Publish's autoResolvePaths now recovers from —
+// completely untested. Machine A commits stale placeholder SVG content to
+// the exact same paths machine B's own SVG-mode run regenerates, forcing a
+// genuine rebase conflict rather than a clean auto-merge on disjoint files.
+func TestRun_SVGMode_MultiMachineMerge_RaceDuringRetry(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	// A second seed commit adds placeholder SVG files, mirroring steady
+	// state: an adopter's target repo already has card-*.svg from an
+	// earlier run before this race begins.
+	seedDir := cloneWorkdir(t, remote, "seed-svg")
+	for _, rel := range []string{svgLightRelPath, svgDarkRelPath} {
+		path := filepath.Join(seedDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll error = %v", err)
+		}
+		if err := os.WriteFile(path, []byte("<svg>seed placeholder</svg>"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", rel, err)
+		}
+	}
+	runGitT(t, seedDir, "add", svgLightRelPath, svgDarkRelPath)
+	runGitT(t, seedDir, "commit", "-q", "-m", "seed placeholder SVG files")
+	runGitT(t, seedDir, "push", "-q")
+
+	asOf := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	workA := cloneWorkdir(t, remote, "machineA-svg")
+	if err := snapshot.Write(workA, "machine-a", []snapshot.Row{
+		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 1000, Cost: 1.5},
+	}); err != nil {
+		t.Fatalf("snapshot.Write(machine-a) error = %v", err)
+	}
+	for _, rel := range []string{svgLightRelPath, svgDarkRelPath} {
+		path := filepath.Join(workA, filepath.FromSlash(rel))
+		if err := os.WriteFile(path, []byte("<svg>machine-a-stale-content</svg>"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", rel, err)
+		}
+	}
+	runGitT(t, workA, "add", filepath.Join(".token-profile", "snapshots", "machine-a"), svgLightRelPath, svgDarkRelPath)
+	runGitT(t, workA, "commit", "-q", "-m", "machine-a snapshot + stale SVG")
+
+	workB := cloneWorkdir(t, remote, "machineB-svg")
+	installRacingPeerHook(t, workB, workA)
+
+	binB := fakeAgentsviewBinary(t, "codex", "gpt-5.4", "2026-06-21", 500, 0.75)
+	depsB := RunDeps{
+		// RenderMode deliberately left unset — SVG default, same premise as
+		// TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles.
+		Config:    config.Config{Breakdown: config.BreakdownPerModel},
+		Client:    &agentsview.Client{BinaryName: binB},
+		MachineID: "machine-b",
+		Now:       asOf,
+		RepoDir:   workB,
+	}
+	if err := Run(t.Context(), depsB); err != nil {
+		t.Fatalf("Run() on machine B error = %v, want nil (a rebase conflict on the regenerated SVG files must auto-resolve, not fail the run)", err)
+	}
+
+	verify := cloneWorkdir(t, remote, "verify-svg-race")
+	for _, rel := range []string{svgLightRelPath, svgDarkRelPath} {
+		content, err := os.ReadFile(filepath.Join(verify, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", rel, err)
+		}
+		got := string(content)
+		if strings.Contains(got, "machine-a-stale-content") || strings.Contains(got, "seed placeholder") {
+			t.Errorf("%s still contains stale pre-rebase content, want it regenerated from the merged post-rebase data:\n%s", rel, got)
+		}
+		if !strings.Contains(got, "<svg") {
+			t.Errorf("%s missing a real <svg> element after regeneration:\n%s", rel, got)
+		}
+		// The breakdown (per-model, so both machines' models) renders inside
+		// the SVG itself, not the README's markdown text.
+		if !strings.Contains(got, "claude-sonnet-5") || !strings.Contains(got, "gpt-5.4") {
+			t.Errorf("%s missing one of both machines' models in the breakdown after the race:\n%s", rel, got)
+		}
+	}
+
+	readmeBytes, err := os.ReadFile(filepath.Join(verify, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(README.md) error = %v", err)
+	}
+	got := string(readmeBytes)
+	// 1000 (machine A, learned about only via the retry's rebase) + 500
+	// (machine B) = 1,500 combined tokens, same combined-totals proof
+	// TestRun_MultiMachineMerge_RaceDuringRetry uses for the ASCII path.
+	if !strings.Contains(got, "1,500") {
+		t.Errorf("README missing combined total \"1,500\" tokens after the race:\n%s", got)
+	}
+}
+
 // TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles covers AE1: an
 // adopter who has not set RenderMode gets the new SVG card automatically —
 // both light and dark SVG files land on disk under deps.RepoDir, and the
