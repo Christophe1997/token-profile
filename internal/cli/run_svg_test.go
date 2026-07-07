@@ -16,6 +16,44 @@ import (
 	"github.com/Christophe1997/token-profile/internal/summary"
 )
 
+// TestWriteCardFile_MkdirAllFailure covers writeCardFile's first error
+// branch: relPath's parent directory can't be created because a regular
+// file already occupies that path, so os.MkdirAll fails.
+func TestWriteCardFile_MkdirAllFailure(t *testing.T) {
+	repoDir := t.TempDir()
+	blocker := filepath.Join(repoDir, ".token-profile")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", blocker, err)
+	}
+
+	err := writeCardFile(repoDir, svgLightRelPath, "<svg></svg>")
+	if err == nil {
+		t.Fatal("writeCardFile() error = nil, want an error when the parent path is a file")
+	}
+	if !strings.Contains(err.Error(), "creating directory for") {
+		t.Errorf("writeCardFile() error = %q, want it to mention the directory-creation failure", err.Error())
+	}
+}
+
+// TestWriteCardFile_WriteFileFailure covers writeCardFile's second error
+// branch: relPath itself is pre-occupied by a directory, so os.WriteFile
+// fails to write the card content to it.
+func TestWriteCardFile_WriteFileFailure(t *testing.T) {
+	repoDir := t.TempDir()
+	blocker := filepath.Join(repoDir, filepath.FromSlash(svgLightRelPath))
+	if err := os.MkdirAll(blocker, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", blocker, err)
+	}
+
+	err := writeCardFile(repoDir, svgLightRelPath, "<svg></svg>")
+	if err == nil {
+		t.Fatal("writeCardFile() error = nil, want an error when relPath is a directory")
+	}
+	if !strings.Contains(err.Error(), "writing "+svgLightRelPath) {
+		t.Errorf("writeCardFile() error = %q, want it to mention the write failure", err.Error())
+	}
+}
+
 // TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles covers AE1: an
 // adopter who has not set RenderMode gets the new SVG card automatically —
 // both light and dark SVG files land on disk under deps.RepoDir, and the
