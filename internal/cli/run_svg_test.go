@@ -54,6 +54,51 @@ func TestWriteCardFile_WriteFileFailure(t *testing.T) {
 	}
 }
 
+// TestRun_OutOfEnumRenderMode_FilesAndRenderBranchAgree covers a RunDeps
+// built with a RenderMode outside {svg, ascii} — unreachable via the normal
+// config.Load path (Validate rejects it) but constructible directly, as
+// every test in this package already does. mergeRenderInject's switch
+// treats anything other than exactly RenderModeASCII as the SVG branch, so
+// the git-add file list must use the identical predicate (code review F8) —
+// otherwise the SVG files get rendered and written to disk but never
+// committed, leaving them untracked after an apparently-successful run.
+func TestRun_OutOfEnumRenderMode_FilesAndRenderBranchAgree(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	work := cloneWorkdir(t, remote, "svg-out-of-enum")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	deps := RunDeps{
+		Config:    config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderMode("bogus")},
+		Client:    &agentsview.Client{BinaryName: bin},
+		MachineID: "machine-svg-bogus",
+		Now:       time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:   work,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	for _, relPath := range []string{svgLightRelPath, svgDarkRelPath} {
+		if _, err := os.Stat(filepath.Join(work, filepath.FromSlash(relPath))); err != nil {
+			t.Fatalf("Stat(%s) error = %v, want the SVG file rendered to disk", relPath, err)
+		}
+	}
+
+	tracked := runGitT(t, work, "ls-tree", "-r", "--name-only", "HEAD")
+	for _, want := range []string{svgLightRelPath, svgDarkRelPath} {
+		if !strings.Contains(tracked, want) {
+			t.Errorf("git ls-tree HEAD = %q, want it to include %q — rendered SVG files must be committed even for an out-of-enum RenderMode", tracked, want)
+		}
+	}
+	status := runGitT(t, work, "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("git status --porcelain = %q, want a clean working tree (no untracked SVG files left behind)", status)
+	}
+}
+
 // TestRun_SVGMode_DefaultInjectsPictureMarkupAndWritesFiles covers AE1: an
 // adopter who has not set RenderMode gets the new SVG card automatically —
 // both light and dark SVG files land on disk under deps.RepoDir, and the

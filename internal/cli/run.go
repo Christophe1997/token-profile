@@ -131,7 +131,7 @@ func run(ctx context.Context, deps RunDeps) error {
 	}
 
 	files := []string{snapshotRelPath(deps.MachineID), readmeFile}
-	if resolveRenderMode(deps.Config.RenderMode) == config.RenderModeSVG {
+	if resolveRenderMode(deps.Config.RenderMode) != config.RenderModeASCII {
 		files = append(files, svgLightRelPath, svgDarkRelPath)
 	}
 	commitMessage := fmt.Sprintf("chore(token-profile): refresh usage profile as of %s", deps.Now.UTC().Format(time.RFC3339))
