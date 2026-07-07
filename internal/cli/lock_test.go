@@ -42,15 +42,11 @@ func TestAcquireRunLock_SecondAttemptWhileHeld_FailsWithClearError(t *testing.T)
 // stale, removed, and acquisition succeeds.
 func TestAcquireRunLock_StaleLock_DetectedAndCleaned(t *testing.T) {
 	dir := t.TempDir()
-	lockDir := filepath.Join(dir, ".token-profile")
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s) error = %v", lockDir, err)
-	}
 	// A PID this large is certain to belong to no live process on any
 	// realistic system (verified against real darwin syscall.Kill: it
 	// reports ESRCH, "no such process", for this value).
 	const deadPID = 2147483647
-	stalePath := filepath.Join(lockDir, "run.lock")
+	stalePath := filepath.Join(dir, ".token-profile.lock")
 	if err := os.WriteFile(stalePath, []byte(strconv.Itoa(deadPID)), 0o644); err != nil {
 		t.Fatalf("WriteFile(stale lock) error = %v", err)
 	}
@@ -82,7 +78,7 @@ func TestAcquireRunLock_Release_RemovesLockFile(t *testing.T) {
 	}
 	release()
 
-	lockPath := filepath.Join(dir, ".token-profile", "run.lock")
+	lockPath := filepath.Join(dir, ".token-profile.lock")
 	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Stat(lock) error = %v, want os.ErrNotExist after release", err)
 	}

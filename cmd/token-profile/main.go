@@ -57,5 +57,6 @@ func newRootCmd() *cobra.Command {
 	}
 	root.AddCommand(cli.NewRunCmd())
 	root.AddCommand(cli.NewInitCmd())
+	root.AddCommand(cli.NewCleanupCmd())
 	return root
 }

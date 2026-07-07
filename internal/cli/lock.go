@@ -11,18 +11,22 @@ import (
 	"syscall"
 )
 
-// runLockPath returns the exclusive run-lock's path under repoDir,
-// mirroring snapshot.Write's own .token-profile/ convention for where
-// token-profile keeps its local, repo-scoped state.
+// runLockPath returns the exclusive run-lock's path: a sibling of repoDir's
+// .token-profile directory, not nested inside it (KTD15). `cleanup` deletes
+// .token-profile/ while still holding this lock for the remainder of its
+// run; nesting the lock file inside would delete the lock out from under
+// itself before release() runs, reopening the concurrent-race window the
+// lock exists to close.
 func runLockPath(repoDir string) string {
-	return filepath.Join(repoDir, ".token-profile", "run.lock")
+	return filepath.Join(repoDir, ".token-profile.lock")
 }
 
 // acquireRunLock is a narrow, local safety net — not a distributed lock —
-// against two overlapping `token-profile run`/`init` invocations racing on
-// the same target repo's files and git state. It creates an exclusive lock
-// file at repoDir's .token-profile/run.lock containing this process's PID,
-// and returns a release func (call via defer) that removes it.
+// against two overlapping `token-profile run`/`init`/`cleanup` invocations
+// racing on the same target repo's files and git state. It creates an
+// exclusive lock file at repoDir's .token-profile.lock containing this
+// process's PID, and returns a release func (call via defer) that removes
+// it.
 //
 // If a lock file already exists, acquireRunLock checks whether the PID it
 // names is still alive (POSIX: syscall.Kill(pid, 0) — nil or EPERM means
