@@ -6,7 +6,7 @@ agent session data, and publishes it into your `username/username` README.
 It merges usage across all the machines you run it on using git itself as
 the sync layer: no server, no account, no hosted service. The card renders
 inside a collapsible `<details>` section, headline visible at a glance, so
-it doesn't dominate your profile README.
+it doesn't dominate your profile README(See my [profile](https://github.com/Christophe1997/Christophe1997) as live example).
 
 By default, the injected card is one full-color SVG image — title, headline
 stats, trend chart, streak, and breakdown together — switched between GitHub's
