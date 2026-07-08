@@ -44,8 +44,8 @@ func TestStatus_RegisteredWithHistory_PrintsBothMostRecentFirst(t *testing.T) {
 	if !strings.Contains(got, "schedule: registered") || strings.Contains(got, "not registered") {
 		t.Errorf("output = %q, want it to report the schedule as registered (not \"not registered\")", got)
 	}
-	newerIdx := strings.Index(got, newer.Timestamp.Format(time.RFC3339))
-	olderIdx := strings.Index(got, older.Timestamp.Format(time.RFC3339))
+	newerIdx := strings.Index(got, newer.Timestamp.Local().Format(time.RFC3339))
+	olderIdx := strings.Index(got, older.Timestamp.Local().Format(time.RFC3339))
 	if newerIdx == -1 || olderIdx == -1 {
 		t.Fatalf("output = %q, want both record timestamps present", got)
 	}
@@ -93,7 +93,8 @@ func TestStatus_NotRegisteredWithHistory_ReportsBothIndependently(t *testing.T) 
 	bin := fakeLaunchctlBinary(t, statePath, capturePath)
 
 	historyPath := filepath.Join(dir, "history.json")
-	mustAppend(t, historyPath, runhistory.Record{Timestamp: time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC), Success: true})
+	rec := runhistory.Record{Timestamp: time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC), Success: true}
+	mustAppend(t, historyPath, rec)
 
 	var out bytes.Buffer
 	deps := StatusDeps{
@@ -110,7 +111,7 @@ func TestStatus_NotRegisteredWithHistory_ReportsBothIndependently(t *testing.T) 
 	if !strings.Contains(got, "not registered") {
 		t.Errorf("output = %q, want it to report the schedule as not registered", got)
 	}
-	if !strings.Contains(got, "2026-07-08T06:00:00Z") {
+	if !strings.Contains(got, rec.Timestamp.Local().Format(time.RFC3339)) {
 		t.Errorf("output = %q, want the recorded run to still be shown", got)
 	}
 }
@@ -205,6 +206,34 @@ func TestStatus_CorruptedHistory_ReportsUnavailable_StillExitsNil(t *testing.T) 
 	got := out.String()
 	if !strings.Contains(got, "history unavailable") {
 		t.Errorf("output = %q, want a \"history unavailable\" line", got)
+	}
+}
+
+// TestPrintRecord_FormatsTimestampInLocalTime covers the fix: records are
+// stored in UTC (RunDeps.Now is always time.Now().UTC()), but printRecord
+// must display them converted to the viewer's local time — overrides the
+// process-global time.Local rather than relying on the test machine's own
+// timezone, so this is deterministic everywhere CI runs.
+func TestPrintRecord_FormatsTimestampInLocalTime(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("America/New_York tzdata not available: %v", err)
+	}
+	orig := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = orig })
+
+	rec := runhistory.Record{Timestamp: time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC), Success: true}
+	var buf bytes.Buffer
+	printRecord(&buf, rec)
+
+	got := buf.String()
+	want := rec.Timestamp.In(loc).Format(time.RFC3339)
+	if !strings.Contains(got, want) {
+		t.Errorf("printRecord() = %q, want it to contain the local-time-formatted timestamp %q", got, want)
+	}
+	if strings.Contains(got, "06:00:00Z") {
+		t.Errorf("printRecord() = %q, want the UTC timestamp converted to local time, not left as UTC", got)
 	}
 }
 

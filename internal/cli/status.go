@@ -64,9 +64,11 @@ func Status(ctx context.Context, deps StatusDeps) error {
 }
 
 // printRecord writes one history record as a single line: its RFC3339
-// timestamp, then "ok" or "failed: <error text>".
+// timestamp converted to the viewer's local time zone (records are stored
+// in UTC — see RunDeps.Now — so this is a display-only conversion), then
+// "ok" or "failed: <error text>".
 func printRecord(w io.Writer, rec runhistory.Record) {
-	ts := rec.Timestamp.Format(time.RFC3339)
+	ts := rec.Timestamp.Local().Format(time.RFC3339)
 	if rec.Success {
 		fmt.Fprintf(w, "%s  ok\n", ts)
 		return
