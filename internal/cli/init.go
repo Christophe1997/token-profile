@@ -160,6 +160,9 @@ func initLocked(ctx context.Context, deps InitDeps, interval time.Duration) (dry
 	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath, interval); err != nil {
 		return false, fmt.Errorf("scaffolding scheduling entry: %w", err)
 	}
+	if deps.Stdout != nil {
+		fmt.Fprintf(deps.Stdout, "wrote scheduling entry to %s (edit it to customize before installing manually, or accept the prompt below to install it now)\n", deps.ScheduleDest)
+	}
 
 	if err := run(ctx, RunDeps{
 		Config:    deps.Config,

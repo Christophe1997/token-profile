@@ -181,6 +181,9 @@ func TestInit_Success_PrintsHeadlineAndCommitHash(t *testing.T) {
 	if !strings.Contains(got, hash) {
 		t.Errorf("Init() Stdout = %q, want it to contain the published commit's short hash %q", got, hash)
 	}
+	if !strings.Contains(got, scheduleDest) {
+		t.Errorf("Init() Stdout = %q, want it to report the scheduling entry path %q", got, scheduleDest)
+	}
 }
 
 // TestInit_Rerun_NoOp covers the edge case: re-running init against an
