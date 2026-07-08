@@ -286,6 +286,13 @@ func installLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, erro
 	return ScheduleRegistered, nil
 }
 
+// removeLaunchd deregisters the live launchd job via `bootout` and then
+// deletes the on-disk plist installLaunchd wrote at deps.PlistPath.
+// Deleting the file matters as much as the bootout itself: launchd reloads
+// every plist present under the LaunchAgents directory at each new login
+// regardless of a prior bootout in the current session, so leaving the
+// file behind would let the schedule silently reactivate itself at the
+// user's next login.
 func removeLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
 	bin, err := launchctlPath(deps)
 	if err != nil {
@@ -298,6 +305,9 @@ func removeLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, error
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
 		return ScheduleRegistered, fmt.Errorf("launchctl bootout %s: %w: %s", target, err, strings.TrimSpace(out.String()))
+	}
+	if err := os.Remove(deps.PlistPath); err != nil && !os.IsNotExist(err) {
+		return ScheduleRegistered, fmt.Errorf("removing plist %s: %w", deps.PlistPath, err)
 	}
 	return ScheduleNotRegistered, nil
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -231,6 +232,35 @@ func TestScheduleRoundTrip_Darwin(t *testing.T) {
 	}
 	if checkState != ScheduleNotRegistered {
 		t.Errorf("CheckScheduleState() after remove = %v, want ScheduleNotRegistered", checkState)
+	}
+}
+
+// TestRemoveSchedule_Darwin_DeletesPlistFile covers removeLaunchd actually
+// deleting the on-disk plist installLaunchd wrote — not just deregistering
+// the live launchd job via `bootout`. macOS's launchd reloads every plist
+// present under the LaunchAgents directory at each new login regardless of
+// a prior `bootout` in the current session, so leaving the file behind
+// would let the schedule silently reactivate itself at the user's next
+// login, defeating RemoveSchedule's whole purpose.
+func TestRemoveSchedule_Darwin_DeletesPlistFile(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeLaunchctlBinary(t, statePath, capturePath)
+	deps := darwinDeps(t, bin)
+
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("InstallSchedule() error = %v, want nil", err)
+	}
+	if _, statErr := os.Stat(deps.PlistPath); statErr != nil {
+		t.Fatalf("Stat(PlistPath) after install error = %v, want the plist to exist", statErr)
+	}
+
+	if _, err := RemoveSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("RemoveSchedule() error = %v, want nil", err)
+	}
+	if _, statErr := os.Stat(deps.PlistPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(PlistPath) after remove error = %v, want os.ErrNotExist (the plist must be deleted, not just booted out)", statErr)
 	}
 }
 

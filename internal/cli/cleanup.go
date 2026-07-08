@@ -413,7 +413,8 @@ func NewCleanupCmd() *cobra.Command {
 			result, err := Cleanup(cmd.Context(), CleanupDeps{
 				RepoDir: cfg.TargetRepo,
 				Schedule: ScheduleDeps{
-					Label: launchdLabel,
+					Label:     launchdLabel,
+					PlistPath: defaultLaunchdPlistPath(),
 				},
 				Interactive: isInteractive(os.Stdin),
 				Output:      cmd.OutOrStdout(),
