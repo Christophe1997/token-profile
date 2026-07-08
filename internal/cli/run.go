@@ -24,6 +24,7 @@ import (
 	"github.com/Christophe1997/token-profile/internal/machineid"
 	"github.com/Christophe1997/token-profile/internal/readme"
 	"github.com/Christophe1997/token-profile/internal/render"
+	"github.com/Christophe1997/token-profile/internal/runhistory"
 	"github.com/Christophe1997/token-profile/internal/snapshot"
 	"github.com/Christophe1997/token-profile/internal/summary"
 )
@@ -88,6 +89,11 @@ type RunDeps struct {
 	// real, inspectable changes — only the commit and push are skipped, in
 	// favor of a printed summary of what would have been committed.
 	DryRun bool
+	// HistoryPath is where Run records this invocation's outcome (R1). An
+	// empty value silently disables recording, mirroring Stdout's own
+	// nil-is-a-no-op convention — every RunDeps literal that predates this
+	// field keeps behaving exactly as before.
+	HistoryPath string
 }
 
 // Run executes the end-to-end refresh flow: resolve this machine's usage,
@@ -102,8 +108,16 @@ type RunDeps struct {
 //
 // Each stage's error is wrapped with enough context to identify which
 // stage failed, since a run can fail at many different points.
-func Run(ctx context.Context, deps RunDeps) error {
-	if err := requireGitWorkTree(ctx, deps.RepoDir); err != nil {
+//
+// The named return plus its deferred recordRunOutcome call (KTD3) wrap
+// every exit path — including requireGitWorkTree and acquireRunLock's own
+// preflight failures, not just the inner run pipeline — so a silently
+// failing schedule (deleted target repo, a stuck lock) still shows up in
+// run history.
+func Run(ctx context.Context, deps RunDeps) (err error) {
+	defer func() { recordRunOutcome(deps, err) }()
+
+	if err = requireGitWorkTree(ctx, deps.RepoDir); err != nil {
 		return err
 	}
 
@@ -113,7 +127,24 @@ func Run(ctx context.Context, deps RunDeps) error {
 	}
 	defer release()
 
-	return run(ctx, deps)
+	err = run(ctx, deps)
+	return err
+}
+
+// recordRunOutcome appends this invocation's outcome to deps.HistoryPath
+// (R1). It never fails Run (R6) — mirroring writeSuccessSummary's own
+// best-effort-warn precedent — and is a no-op when HistoryPath is unset.
+func recordRunOutcome(deps RunDeps, err error) {
+	if deps.HistoryPath == "" {
+		return
+	}
+	rec := runhistory.Record{Timestamp: deps.Now, Success: err == nil}
+	if err != nil {
+		rec.Error = err.Error()
+	}
+	if persistErr := runhistory.Append(deps.HistoryPath, rec); persistErr != nil && deps.Stdout != nil {
+		fmt.Fprintf(deps.Stdout, "warning: recording run history failed: %v\n", persistErr)
+	}
 }
 
 // run is Run's validated, locked core. It's factored out so Init can
@@ -486,13 +517,14 @@ func NewRunCmd() *cobra.Command {
 			}
 
 			deps := RunDeps{
-				Config:    cfg,
-				Client:    &agentsview.Client{},
-				MachineID: machineID,
-				Now:       time.Now().UTC(),
-				RepoDir:   cfg.TargetRepo,
-				Stdout:    cmd.OutOrStdout(),
-				DryRun:    dryRun,
+				Config:      cfg,
+				Client:      &agentsview.Client{},
+				MachineID:   machineID,
+				Now:         time.Now().UTC(),
+				RepoDir:     cfg.TargetRepo,
+				Stdout:      cmd.OutOrStdout(),
+				DryRun:      dryRun,
+				HistoryPath: defaultStateFile("history.json"),
 			}
 			return Run(cmd.Context(), deps)
 		},

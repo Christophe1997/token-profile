@@ -15,6 +15,7 @@ import (
 	"github.com/Christophe1997/token-profile/internal/config"
 	"github.com/Christophe1997/token-profile/internal/readme"
 	"github.com/Christophe1997/token-profile/internal/render"
+	"github.com/Christophe1997/token-profile/internal/runhistory"
 	"github.com/Christophe1997/token-profile/internal/snapshot"
 )
 
@@ -853,5 +854,183 @@ func TestRun_ReadmeMissingMarkers_SurfacesErrMarkersMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "init") {
 		t.Errorf("Run() error = %q, want guidance to run `token-profile init`", err.Error())
+	}
+}
+
+// TestRun_Success_RecordsSuccessToHistory covers R1's happy path: a
+// successful Run call appends exactly one Success:true record to
+// HistoryPath.
+func TestRun_Success_RecordsSuccessToHistory(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 record", records)
+	}
+	if !records[0].Success || records[0].Error != "" {
+		t.Errorf("record = %+v, want Success=true and empty Error", records[0])
+	}
+	if !records[0].Timestamp.Equal(deps.Now) {
+		t.Errorf("record.Timestamp = %v, want %v", records[0].Timestamp, deps.Now)
+	}
+}
+
+// TestRun_PipelineFailure_RecordsFailureToHistory covers the inner-pipeline
+// error path: a run that fails inside the refresh pipeline (after
+// preflight succeeds) still appends a Success:false record whose Error
+// contains the wrapped error text.
+func TestRun_PipelineFailure_RecordsFailureToHistory(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+	}
+
+	if err := Run(t.Context(), deps); err == nil {
+		t.Fatal("Run() error = nil, want an error (unmarked README)")
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=false record", records)
+	}
+	if !strings.Contains(records[0].Error, "markers") {
+		t.Errorf("record.Error = %q, want it to mention the missing markers", records[0].Error)
+	}
+}
+
+// TestRun_NotGitRepo_RecordsFailureToHistory covers KTD3: a preflight
+// failure (RepoDir isn't a git work tree) still appends a Success:false
+// record — recording every exit path, not just the inner pipeline's.
+func TestRun_NotGitRepo_RecordsFailureToHistory(t *testing.T) {
+	dir := t.TempDir()
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     dir,
+		HistoryPath: historyPath,
+	}
+
+	if err := Run(t.Context(), deps); err == nil {
+		t.Fatal("Run() error = nil, want an error when RepoDir isn't a git repository")
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=false record", records)
+	}
+	if !strings.Contains(records[0].Error, "not a git repository") {
+		t.Errorf("record.Error = %q, want it to explain RepoDir isn't a git repository", records[0].Error)
+	}
+}
+
+// TestRun_LockHeld_RecordsFailureToHistory covers KTD3's other preflight
+// case: a lock already held by a live process still appends a
+// Success:false record.
+func TestRun_LockHeld_RecordsFailureToHistory(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	release, err := acquireRunLock(work)
+	if err != nil {
+		t.Fatalf("acquireRunLock() setup error = %v, want nil", err)
+	}
+	defer release()
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+	}
+
+	if err := Run(t.Context(), deps); err == nil {
+		t.Fatal("Run() error = nil, want an error when the run-lock is already held")
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=false record", records)
+	}
+	if !strings.Contains(records[0].Error, "already in progress") {
+		t.Errorf("record.Error = %q, want it to explain the lock is already held", records[0].Error)
+	}
+}
+
+// TestRun_UnwritableHistoryPath_DoesNotFailRun covers AE2/R6: pointing
+// HistoryPath at a location that can't be written to must not change Run's
+// returned error on an otherwise-successful run.
+func TestRun_UnwritableHistoryPath_DoesNotFailRun(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	blockerDir := t.TempDir()
+	blocker := filepath.Join(blockerDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seeding blocker file: %v", err)
+	}
+	historyPath := filepath.Join(blocker, "history.json")
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil (an unwritable HistoryPath must not fail an otherwise-successful run)", err)
 	}
 }
