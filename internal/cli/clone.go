@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,17 +59,33 @@ func cloneOrAdopt(ctx context.Context, url, dest string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf(
 			"clone destination %q is an existing git repository, but its %q remote could not be resolved (expected it to match %s): %w",
-			dest, "origin", url, err,
+			dest, "origin", redactCredentials(url), err,
 		)
 	}
 	if origin != url {
 		return "", fmt.Errorf(
 			"clone destination %q already has an %q remote (%s) that does not match the resolved profile repo URL (%s) — refusing to adopt an unrelated repository as the publish target",
-			dest, "origin", origin, url,
+			dest, "origin", redactCredentials(origin), redactCredentials(url),
 		)
 	}
 
 	return fmt.Sprintf("adopted existing clone at %s (origin already matches %s)", dest, url), nil
+}
+
+// redactCredentials strips a URL's userinfo component before it's echoed
+// into error output — an existing remote (e.g. a headless/CI clone's
+// origin) may embed a personal access token in https://<token>@host/...
+// form, and that must never reach a terminal or log. Falls back to the
+// original string when it doesn't parse as a URL, which covers scp-style
+// git@host:path addresses — those never carry a secret in their user
+// portion, so there's nothing to strip.
+func redactCredentials(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User == nil {
+		return rawURL
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 // hasGitDir reports whether dir looks like a git working tree, checking

@@ -188,6 +188,33 @@ func TestCloneOrAdopt_AuthRequiredFailsFastInsteadOfHanging(t *testing.T) {
 	}
 }
 
+// TestCloneOrAdopt_MismatchedOriginError_RedactsCredentials covers a
+// mismatched-origin error where the existing (unrelated) clone's origin
+// remote embeds a credential, e.g. a headless/CI clone configured with a
+// personal access token in https://<token>@host/... form. cloneOrAdopt must
+// never echo that credential verbatim into an error message a caller may
+// print to a terminal or log.
+func TestCloneOrAdopt_MismatchedOriginError_RedactsCredentials(t *testing.T) {
+	wantRemote := initBareRemote(t)
+	seedRemote(t, wantRemote, markedReadme)
+
+	dest := t.TempDir()
+	runGitT(t, dest, "init", "-q", "-b", "main", dest)
+	const secretOrigin = "https://ghp_supersecrettoken123@github.com/someone/somerepo.git"
+	runGitT(t, dest, "remote", "add", "origin", secretOrigin)
+
+	_, err := cloneOrAdopt(t.Context(), wantRemote, dest)
+	if err == nil {
+		t.Fatal("cloneOrAdopt() error = nil, want a mismatch error")
+	}
+	if strings.Contains(err.Error(), "ghp_supersecrettoken123") {
+		t.Errorf("error %q leaks the embedded credential from the existing origin", err.Error())
+	}
+	if !strings.Contains(err.Error(), "github.com/someone/somerepo.git") {
+		t.Errorf("error %q should still name the redacted origin host/path for debugging", err.Error())
+	}
+}
+
 // TestCloneOrAdopt_ErrorsOnMissingOriginRemote covers dest already being a
 // git working tree that simply has no "origin" remote configured at all —
 // distinct from a mismatched origin (per the plan's KTD4 note): resolving
