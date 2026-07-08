@@ -104,6 +104,12 @@ type cleanupFootprint struct {
 	readmeBytes   int
 	fileCount     int
 	uncommitted   []string
+	// warnings holds any inspection sub-check that failed to read (e.g. an
+	// unreadable README, a WalkDir failure under .token-profile/, a failing
+	// `git status`) — recorded rather than aborting inspectFootprint, so a
+	// read-only preview failure never blocks the confirmation prompt (and,
+	// downstream, schedule deregistration) from ever being reached.
+	warnings []string
 }
 
 func (f cleanupFootprint) String() string {
@@ -122,6 +128,9 @@ func (f cleanupFootprint) String() string {
 			fmt.Fprintf(&b, "      %s\n", line)
 		}
 	}
+	for _, w := range f.warnings {
+		fmt.Fprintf(&b, "  - warning: %s\n", w)
+	}
 	return b.String()
 }
 
@@ -131,11 +140,13 @@ func (f cleanupFootprint) String() string {
 // git working tree, strips README.md's marker interior and deletes
 // .token-profile/ under the protection of the same run-lock run/init use.
 //
-// RepoDir's validity is checked once, strictly before acquireRunLock is
-// ever called (KTD5): acquireRunLock's own os.MkdirAll would otherwise
-// silently recreate a deliberately-deleted RepoDir as a side effect of
-// taking the lock, undermining the whole point of degrading a missing repo
-// to a no-op rather than resurrecting it.
+// RepoDir's validity is checked both before inspectFootprint and again
+// immediately after the confirmation prompt returns (KTD5): the prompt is
+// an unbounded wait on real user input, so trusting a pre-prompt snapshot
+// would let acquireRunLock's own os.MkdirAll silently recreate a RepoDir
+// that was deliberately deleted (or otherwise stopped being a valid git
+// working tree) while the prompt was still open — undermining the whole
+// point of degrading a missing repo to a no-op rather than resurrecting it.
 func Cleanup(ctx context.Context, deps CleanupDeps) (CleanupResult, error) {
 	if !deps.Interactive {
 		return CleanupResult{}, errCleanupRequiresTTY
@@ -143,29 +154,28 @@ func Cleanup(ctx context.Context, deps CleanupDeps) (CleanupResult, error) {
 
 	repoValid := deps.RepoDir != "" && requireGitWorkTree(ctx, deps.RepoDir) == nil
 
-	footprint, err := inspectFootprint(ctx, deps, repoValid)
-	if err != nil {
-		return CleanupResult{}, fmt.Errorf("inspecting cleanup footprint: %w", err)
-	}
+	footprint := inspectFootprint(ctx, deps, repoValid)
 
 	confirmed, err := confirmCleanup(deps, footprint)
 	if err != nil {
-		return CleanupResult{}, err
+		return CleanupResult{RepoValid: repoValid}, err
 	}
 	if !confirmed {
 		return CleanupResult{Declined: true}, nil
 	}
 
-	if !repoValid {
-		state, err := deregisterSchedule(ctx, deps.Schedule)
-		return CleanupResult{Schedule: state}, err
-	}
+	// Re-check immediately before acting rather than trusting the pre-prompt
+	// snapshot above — see the doc comment.
+	repoValid = repoValid && requireGitWorkTree(ctx, deps.RepoDir) == nil
 
-	// Schedule deregistration never depends on lock acquisition (KTD5,
-	// KTD6): it runs before acquireRunLock is even attempted, so a
-	// contended lock still lets the schedule get deregistered.
+	// Schedule deregistration never depends on lock acquisition or RepoDir's
+	// (re-checked) validity (KTD5, KTD6): it's attempted exactly once, right
+	// after confirmation, regardless of which branch follows.
 	scheduleState, scheduleErr := deregisterSchedule(ctx, deps.Schedule)
-	result := CleanupResult{RepoValid: true, Schedule: scheduleState}
+	result := CleanupResult{RepoValid: repoValid, Schedule: scheduleState}
+	if !repoValid {
+		return result, scheduleErr
+	}
 
 	release, lockErr := acquireRunLock(deps.RepoDir)
 	if lockErr != nil {
@@ -214,39 +224,45 @@ func deregisterSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, 
 // inspectFootprint gathers everything Cleanup's confirmation prompt reports,
 // entirely read-only. When repoValid is false, only the schedule label is
 // reported — every repo-side detail is meaningless for a missing/corrupted
-// RepoDir.
-func inspectFootprint(ctx context.Context, deps CleanupDeps, repoValid bool) (cleanupFootprint, error) {
+// RepoDir. A sub-check failing (an unreadable README, a WalkDir failure
+// under .token-profile/, a failing `git status`) is recorded as a warning
+// rather than aborting: this is only a preview, and never returning an
+// error keeps Cleanup's confirmation prompt — and, downstream, schedule
+// deregistration — reachable regardless of a read-only preview step
+// failing.
+func inspectFootprint(ctx context.Context, deps CleanupDeps, repoValid bool) cleanupFootprint {
 	footprint := cleanupFootprint{scheduleLabel: deps.Schedule.Label, repoValid: repoValid}
 	if !repoValid {
-		return footprint, nil
+		return footprint
 	}
 
 	readmePath := filepath.Join(deps.RepoDir, readmeFile)
 	readmeBytes, err := os.ReadFile(readmePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return cleanupFootprint{}, fmt.Errorf("reading README %s: %w", readmePath, err)
-	}
-	if readmeBytes != nil {
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		footprint.warnings = append(footprint.warnings, fmt.Sprintf("could not read README %s: %v", readmePath, err))
+	case readmeBytes != nil:
 		stripped, err := readme.Strip(readmeBytes)
 		if err != nil {
-			return cleanupFootprint{}, fmt.Errorf("inspecting README markers: %w", err)
+			footprint.warnings = append(footprint.warnings, fmt.Sprintf("could not inspect README markers: %v", err))
+		} else {
+			footprint.readmeBytes = len(readmeBytes) - len(stripped)
 		}
-		footprint.readmeBytes = len(readmeBytes) - len(stripped)
 	}
 
-	fileCount, err := countFiles(filepath.Join(deps.RepoDir, tokenProfileDir))
-	if err != nil {
-		return cleanupFootprint{}, fmt.Errorf("counting .token-profile files: %w", err)
+	if fileCount, err := countFiles(filepath.Join(deps.RepoDir, tokenProfileDir)); err != nil {
+		footprint.warnings = append(footprint.warnings, fmt.Sprintf("could not count .token-profile files: %v", err))
+	} else {
+		footprint.fileCount = fileCount
 	}
-	footprint.fileCount = fileCount
 
-	uncommitted, err := uncommittedPaths(ctx, deps.RepoDir)
-	if err != nil {
-		return cleanupFootprint{}, fmt.Errorf("checking working tree status: %w", err)
+	if uncommitted, err := uncommittedPaths(ctx, deps.RepoDir); err != nil {
+		footprint.warnings = append(footprint.warnings, fmt.Sprintf("could not check working tree status: %v", err))
+	} else {
+		footprint.uncommitted = uncommitted
 	}
-	footprint.uncommitted = uncommitted
 
-	return footprint, nil
+	return footprint
 }
 
 // countFiles counts the regular files (recursively) under dir, reporting 0

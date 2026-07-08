@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,6 +295,138 @@ func TestCleanup_TargetRepoNotGitRepo_NoOp(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "somefile" {
 		t.Errorf("ReadDir(dir) = %v, want only the original somefile (nothing created)", entries)
+	}
+}
+
+// removeOnReadReader wraps r, os.RemoveAll'ing target the first time Read
+// is called — used to simulate a filesystem change happening while a
+// blocking confirmation prompt (backed by r) is still awaiting input,
+// without needing real concurrency or timing.
+type removeOnReadReader struct {
+	r       io.Reader
+	target  string
+	removed bool
+}
+
+func (rr *removeOnReadReader) Read(p []byte) (int, error) {
+	if !rr.removed {
+		rr.removed = true
+		os.RemoveAll(rr.target)
+	}
+	return rr.r.Read(p)
+}
+
+// TestCleanup_RepoDirRemovedDuringConfirmation_TreatedAsNoOpNotResurrected
+// covers RepoDir disappearing out from under Cleanup while its interactive
+// confirmation prompt is still blocked reading input. The repoValid
+// snapshot taken before the prompt must be re-checked afterward — trusting
+// it would let acquireRunLock's MkdirAll silently resurrect the
+// deliberately-removed directory, exactly the resurrection Cleanup's own
+// design says must never happen (KTD5).
+func TestCleanup_RepoDirRemovedDuringConfirmation_TreatedAsNoOpNotResurrected(t *testing.T) {
+	dir := cleanupWorkdir(t)
+	schedule, capturePath := registeredLaunchdDeps(t)
+
+	input := &removeOnReadReader{r: scriptedInput("y"), target: dir}
+
+	result, err := Cleanup(t.Context(), CleanupDeps{
+		RepoDir:     dir,
+		Schedule:    schedule,
+		Interactive: true,
+		Accessible:  true,
+		Input:       input,
+		Output:      &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v, want nil (a repo removed mid-confirmation degrades to a no-op)", err)
+	}
+	if result.RepoValid {
+		t.Error("result.RepoValid = true, want false — RepoDir was removed before repo-side steps ran")
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(dir) error = %v, want os.ErrNotExist — RepoDir must not be resurrected by acquireRunLock", statErr)
+	}
+
+	sawBootout := false
+	for _, call := range readCaptureFile(t, capturePath) {
+		if strings.HasPrefix(call, "bootout ") {
+			sawBootout = true
+		}
+	}
+	if !sawBootout {
+		t.Error("launchctl bootout never invoked, want schedule deregistration regardless of the repo disappearing mid-confirmation")
+	}
+}
+
+// TestInspectFootprint_ReadmeReadFails_DegradesToWarning covers a footprint
+// sub-check failing (README.md replaced by a directory, so os.ReadFile
+// fails with something other than os.ErrNotExist): inspectFootprint must
+// record it as a warning rather than aborting, so Cleanup's confirmation
+// prompt — and, downstream, schedule deregistration — is always reachable
+// regardless of a read-only preview step failing.
+func TestInspectFootprint_ReadmeReadFails_DegradesToWarning(t *testing.T) {
+	dir := cleanupWorkdir(t)
+	readmePath := filepath.Join(dir, readmeFile)
+	if err := os.Remove(readmePath); err != nil {
+		t.Fatalf("Remove(README) error = %v", err)
+	}
+	if err := os.Mkdir(readmePath, 0o755); err != nil {
+		t.Fatalf("Mkdir(README) error = %v", err)
+	}
+
+	footprint := inspectFootprint(t.Context(), CleanupDeps{RepoDir: dir, Schedule: ScheduleDeps{Label: "test"}}, true)
+
+	if len(footprint.warnings) == 0 {
+		t.Fatal("footprint.warnings is empty, want a warning recorded for the unreadable README")
+	}
+	if !strings.Contains(footprint.String(), "warning") {
+		t.Errorf("footprint.String() = %q, want the confirmation prompt to surface the inspection warning", footprint.String())
+	}
+	if footprint.fileCount == 0 {
+		t.Error("footprint.fileCount = 0, want the unrelated .token-profile count to still be populated despite the README warning")
+	}
+}
+
+// TestCleanup_FootprintInspectionWarning_StillDeregistersSchedule covers
+// the end-to-end effect of the fix above: even with a footprint-inspection
+// sub-check failing (the same broken README as above), Cleanup must still
+// reach the confirmation prompt and deregister the schedule — previously,
+// inspectFootprint's hard error short-circuited Cleanup before either ever
+// ran, silently leaving the schedule registered.
+func TestCleanup_FootprintInspectionWarning_StillDeregistersSchedule(t *testing.T) {
+	dir := cleanupWorkdir(t)
+	readmePath := filepath.Join(dir, readmeFile)
+	if err := os.Remove(readmePath); err != nil {
+		t.Fatalf("Remove(README) error = %v", err)
+	}
+	if err := os.Mkdir(readmePath, 0o755); err != nil {
+		t.Fatalf("Mkdir(README) error = %v", err)
+	}
+	schedule, capturePath := registeredLaunchdDeps(t)
+
+	result, _ := Cleanup(t.Context(), CleanupDeps{
+		RepoDir:     dir,
+		Schedule:    schedule,
+		Interactive: true,
+		Accessible:  true,
+		Input:       scriptedInput("y"),
+		Output:      &bytes.Buffer{},
+	})
+	// The later README-stripping step still fails on the deliberately
+	// broken README (it's a directory), so Cleanup's overall error is not
+	// asserted here — only that schedule deregistration, which runs before
+	// that step, was not skipped.
+	if result.Schedule != ScheduleRegistered {
+		t.Errorf("result.Schedule = %v, want ScheduleRegistered", result.Schedule)
+	}
+	sawBootout := false
+	for _, call := range readCaptureFile(t, capturePath) {
+		if strings.HasPrefix(call, "bootout ") {
+			sawBootout = true
+		}
+	}
+	if !sawBootout {
+		t.Error("launchctl bootout never invoked, want schedule deregistration to run despite the footprint-inspection warning")
 	}
 }
 
