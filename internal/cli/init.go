@@ -511,6 +511,9 @@ func resolveInitConfig(ctx context.Context, deps initConfigDeps) (config.Config,
 	}); err != nil {
 		return config.Config{}, fmt.Errorf("writing config after guided setup: %w", err)
 	}
+	if deps.Stdout != nil {
+		fmt.Fprintf(deps.Stdout, "wrote config to %s (edit it to customize breakdown, render mode, and more)\n", deps.ConfigPath)
+	}
 
 	return config.Load(deps.ConfigPath)
 }

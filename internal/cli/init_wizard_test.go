@@ -152,6 +152,9 @@ func TestResolveInitConfig_FreshMachine_WizardConfirmed_ClonesAndWritesConfig(t 
 	if !strings.Contains(stdout.String(), "cloned") {
 		t.Errorf("Stdout = %q, want it to report the clone status", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), configPath) {
+		t.Errorf("Stdout = %q, want it to report the config path %q", stdout.String(), configPath)
+	}
 
 	onDisk, err := config.Load(configPath)
 	if err != nil {
