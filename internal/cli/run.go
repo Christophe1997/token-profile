@@ -127,8 +127,7 @@ func Run(ctx context.Context, deps RunDeps) (err error) {
 	}
 	defer release()
 
-	err = run(ctx, deps)
-	return err
+	return run(ctx, deps)
 }
 
 // recordRunOutcome appends this invocation's outcome to deps.HistoryPath

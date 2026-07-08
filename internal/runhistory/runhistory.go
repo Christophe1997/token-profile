@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Christophe1997/token-profile/internal/atomicfile"
 )
 
 // DefaultLimit is the number of most-recent records Append retains. Fixed
@@ -50,7 +52,7 @@ func Append(path string, rec Record) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating history directory %s: %w", dir, err)
 	}
-	if err := writeFileAtomic(dir, path, data); err != nil {
+	if err := atomicfile.Write(dir, path, data); err != nil {
 		return fmt.Errorf("writing history %s: %w", path, err)
 	}
 	return nil
@@ -73,33 +75,4 @@ func Read(path string) ([]Record, error) {
 		return nil, fmt.Errorf("decoding history %s: %w", path, err)
 	}
 	return records, nil
-}
-
-// writeFileAtomic writes data to path via a temp file created in dir
-// followed by a rename, mirroring internal/snapshot's atomic-write pattern
-// so a process killed mid-write leaves either the previous complete file
-// or the new complete file — never a torn/partial one.
-func writeFileAtomic(dir, path string, data []byte) (err error) {
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Chmod(tmpPath, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }

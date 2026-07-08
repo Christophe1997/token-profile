@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Christophe1997/token-profile/internal/atomicfile"
 )
 
 // Row is one (date, agent, model) usage observation. It intentionally
@@ -132,41 +134,15 @@ func Write(targetRepo, machineID string, rows []Row) error {
 			return fmt.Errorf("encoding snapshot for machine %s: %w", machineID, err)
 		}
 
-		if err := writeFileAtomic(dir, path, data); err != nil {
+		// atomicfile.Write avoids a torn/partial file if the process is
+		// killed mid-write (merge.go tolerates a corrupted file gracefully,
+		// but this avoids the data gap entirely rather than relying on that
+		// fallback).
+		if err := atomicfile.Write(dir, path, data); err != nil {
 			return fmt.Errorf("writing snapshot %s: %w", path, err)
 		}
 	}
 	return nil
-}
-
-// writeFileAtomic writes data to path via a temp file created in dir
-// followed by a rename, so a process killed mid-write leaves either the
-// previous complete file or the new complete file — never a torn/partial
-// one (merge.go tolerates a corrupted file gracefully, but this avoids the
-// data gap entirely rather than relying on that fallback).
-func writeFileAtomic(dir, path string, data []byte) (err error) {
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Chmod(tmpPath, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
 
 // Read decodes machineID's full snapshot history under targetRepo,

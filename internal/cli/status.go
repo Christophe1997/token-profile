@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,7 +34,7 @@ type StatusDeps struct {
 // treatment of ScheduleCheckFailed.
 func Status(ctx context.Context, deps StatusDeps) error {
 	state, err := CheckScheduleState(ctx, deps.Schedule)
-	if state == ScheduleCheckFailed && err != nil {
+	if err != nil {
 		fmt.Fprintf(deps.Stdout, "schedule: %s (%v)\n", state, err)
 	} else {
 		fmt.Fprintf(deps.Stdout, "schedule: %s\n", state)
@@ -48,8 +49,8 @@ func Status(ctx context.Context, deps StatusDeps) error {
 		fmt.Fprintln(deps.Stdout, "no runs recorded yet")
 		return nil
 	}
-	for i := len(records) - 1; i >= 0; i-- {
-		printRecord(deps.Stdout, records[i])
+	for _, rec := range slices.Backward(records) {
+		printRecord(deps.Stdout, rec)
 	}
 	return nil
 }
