@@ -23,7 +23,9 @@ type StatusDeps struct {
 	Schedule ScheduleDeps
 	// HistoryPath is where Status reads recorded run outcomes from.
 	HistoryPath string
-	// Stdout receives the rendered report.
+	// Stdout receives the rendered report. Nil is valid and silently
+	// discards the report, mirroring RunDeps.Stdout's own nil-is-a-no-op
+	// convention.
 	Stdout io.Writer
 }
 
@@ -31,8 +33,14 @@ type StatusDeps struct {
 // run history, most-recent first, to deps.Stdout. It always returns nil: a
 // failed schedule check or an unreadable history file are reported as data
 // rather than as a command failure (KTD5), mirroring cleanup's own
-// treatment of ScheduleCheckFailed.
+// treatment of ScheduleCheckFailed. A nil deps.Stdout silently discards the
+// report rather than panicking, mirroring RunDeps.Stdout's own
+// nil-is-a-no-op convention.
 func Status(ctx context.Context, deps StatusDeps) error {
+	if deps.Stdout == nil {
+		return nil
+	}
+
 	state, err := CheckScheduleState(ctx, deps.Schedule)
 	if err != nil {
 		fmt.Fprintf(deps.Stdout, "schedule: %s (%v)\n", state, err)
@@ -78,7 +86,7 @@ func NewStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Status(cmd.Context(), StatusDeps{
 				Schedule:    ScheduleDeps{Label: launchdLabel},
-				HistoryPath: defaultStateFile("history.json"),
+				HistoryPath: defaultHistoryPath(),
 				Stdout:      cmd.OutOrStdout(),
 			})
 		},

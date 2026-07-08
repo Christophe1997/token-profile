@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/Christophe1997/token-profile/internal/atomicfile"
@@ -20,6 +19,16 @@ import (
 // rather than configurable — no current requirement to change it, and
 // raising it later is a one-line, backward-compatible change.
 const DefaultLimit = 20
+
+// errCorrupt marks a decode failure as Append's cue to self-heal rather
+// than fail forever: a hand-edited, disk-corrupted, or future-incompatible
+// history.json would otherwise permanently block every subsequent run's
+// recording, silently defeating this package's purpose — mirroring
+// internal/snapshot.Merge's own tolerance for a single corrupted chunk
+// file. A different I/O error (e.g. permission denied) still propagates,
+// since starting fresh wouldn't help there — the follow-up write would
+// fail for the same reason.
+var errCorrupt = errors.New("history file is corrupted")
 
 // Record is one run invocation's recorded outcome.
 type Record struct {
@@ -34,7 +43,10 @@ type Record struct {
 func Append(path string, rec Record) error {
 	existing, err := Read(path)
 	if err != nil {
-		return fmt.Errorf("reading existing history %s: %w", path, err)
+		if !errors.Is(err, errCorrupt) {
+			return fmt.Errorf("reading existing history %s: %w", path, err)
+		}
+		existing = nil
 	}
 
 	records := append(existing, rec)
@@ -48,11 +60,7 @@ func Append(path string, rec Record) error {
 	}
 	data = append(data, '\n')
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating history directory %s: %w", dir, err)
-	}
-	if err := atomicfile.Write(dir, path, data); err != nil {
+	if err := atomicfile.Write(path, data); err != nil {
 		return fmt.Errorf("writing history %s: %w", path, err)
 	}
 	return nil
@@ -72,7 +80,7 @@ func Read(path string) ([]Record, error) {
 
 	var records []Record
 	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("decoding history %s: %w", path, err)
+		return nil, fmt.Errorf("decoding history %s: %w (%w)", path, errCorrupt, err)
 	}
 	return records, nil
 }

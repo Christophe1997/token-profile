@@ -13,6 +13,7 @@ import (
 	"github.com/Christophe1997/token-profile/internal/agentsview"
 	"github.com/Christophe1997/token-profile/internal/config"
 	"github.com/Christophe1997/token-profile/internal/readme"
+	"github.com/Christophe1997/token-profile/internal/runhistory"
 )
 
 // TestEnsureReadmeMarkers_NoReadme_CreatesMinimalWithMarkers covers the case
@@ -238,6 +239,88 @@ func TestInit_Rerun_NoOp(t *testing.T) {
 	}
 	if n := strings.Count(string(scheduleBytes), deps.BinaryPath); n != 1 {
 		t.Errorf("scheduling entry contains %d references to the binary after two init runs, want exactly 1 (no duplication)", n)
+	}
+}
+
+// TestInit_Success_RecordsSuccessToHistory covers extending R1's recording
+// contract to init's embedded first run: a successful Init call appends
+// exactly one Success:true record to HistoryPath, the same store `run`
+// records to.
+func TestInit_Success_RecordsSuccessToHistory(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	work := cloneWorkdir(t, remote, "init-history-ok")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-init",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      work,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+		HistoryPath:  historyPath,
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || !records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=true record", records)
+	}
+}
+
+// TestInit_ScaffoldingFailure_RecordsFailureToHistory covers a failure
+// during initLocked's own scaffolding step (before the first run even
+// starts) still appending a Success:false record — mirroring KTD3's
+// "record every exit path" rationale for Run.
+func TestInit_ScaffoldingFailure_RecordsFailureToHistory(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+
+	work := cloneWorkdir(t, remote, "init-history-fail")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	blockerDir := t.TempDir()
+	blocker := filepath.Join(blockerDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seeding blocker file: %v", err)
+	}
+	scheduleDest := filepath.Join(blocker, "schedule")
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-init",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      work,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+		HistoryPath:  historyPath,
+	}
+
+	if err := Init(t.Context(), deps); err == nil {
+		t.Fatal("Init() error = nil, want an error (unwritable schedule dest)")
+	}
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=false record", records)
 	}
 }
 

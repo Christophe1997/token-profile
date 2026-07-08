@@ -41,8 +41,8 @@ func TestStatus_RegisteredWithHistory_PrintsBothMostRecentFirst(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "registered") {
-		t.Errorf("output = %q, want it to report the schedule as registered", got)
+	if !strings.Contains(got, "schedule: registered") || strings.Contains(got, "not registered") {
+		t.Errorf("output = %q, want it to report the schedule as registered (not \"not registered\")", got)
 	}
 	newerIdx := strings.Index(got, newer.Timestamp.Format(time.RFC3339))
 	olderIdx := strings.Index(got, older.Timestamp.Format(time.RFC3339))
@@ -138,6 +138,9 @@ func TestStatus_ScheduleCheckFailed_ReportsCheckFailed_StillExitsNil(t *testing.
 	if !strings.Contains(got, "check failed") {
 		t.Errorf("output = %q, want it to report \"check failed\"", got)
 	}
+	if !strings.Contains(got, "no runs recorded yet") {
+		t.Errorf("output = %q, want it to still report \"no runs recorded yet\" alongside the check-failed schedule line", got)
+	}
 }
 
 // TestStatus_FailedRecord_PrintsErrorTextVerbatim is the integration
@@ -202,6 +205,28 @@ func TestStatus_CorruptedHistory_ReportsUnavailable_StillExitsNil(t *testing.T) 
 	got := out.String()
 	if !strings.Contains(got, "history unavailable") {
 		t.Errorf("output = %q, want a \"history unavailable\" line", got)
+	}
+}
+
+// TestStatus_NilStdout_DoesNotPanic covers the fix: a nil Stdout must
+// silently discard the report, mirroring RunDeps.Stdout's own
+// nil-is-a-no-op convention, rather than panicking on the first Fprintf.
+func TestStatus_NilStdout_DoesNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeLaunchctlBinary(t, statePath, capturePath)
+	if err := os.WriteFile(statePath, nil, 0o644); err != nil {
+		t.Fatalf("seeding registered state: %v", err)
+	}
+
+	deps := StatusDeps{
+		Schedule:    ScheduleDeps{GOOS: "darwin", Label: "dev.token-profile.refresh", Launchctl: bin},
+		HistoryPath: filepath.Join(dir, "history.json"),
+	}
+
+	if err := Status(t.Context(), deps); err != nil {
+		t.Fatalf("Status() error = %v, want nil", err)
 	}
 }
 

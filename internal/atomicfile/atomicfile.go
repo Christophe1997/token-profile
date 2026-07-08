@@ -7,13 +7,20 @@
 package atomicfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
-// Write writes data to path via a temp file created in dir followed by a
-// rename.
-func Write(dir, path string, data []byte) (err error) {
+// Write writes data to path via a temp file created in path's parent
+// directory followed by a rename, creating that directory (and any missing
+// intermediate components) first if needed.
+func Write(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err

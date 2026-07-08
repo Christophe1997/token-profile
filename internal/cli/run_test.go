@@ -1005,6 +1005,51 @@ func TestRun_LockHeld_RecordsFailureToHistory(t *testing.T) {
 	}
 }
 
+// TestRun_PipelinePanics_RecordsFailureThenRePanics covers the gap the
+// panic-recovery in Run's defer closes: Go only assigns a named return from
+// `return expr` after expr evaluates without panicking, so without a
+// recover, a panic inside run(ctx, deps) would leave the deferred
+// recordRunOutcome observing err's zero value (nil) and record a crashed
+// run as Success:true. Client is deliberately left nil, which panics inside
+// the real agentsview.Client.ListActiveAgents (a genuine nil-pointer
+// dereference, not a mock) rather than fabricating an artificial panic.
+func TestRun_PipelinePanics_RecordsFailureThenRePanics(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	historyPath := filepath.Join(t.TempDir(), "history.json")
+
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel},
+		Client:      nil,
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Run() did not panic, want it to re-panic after recording")
+			}
+		}()
+		Run(t.Context(), deps)
+		t.Fatal("Run() returned normally, want it to panic")
+	}()
+
+	records, err := runhistory.Read(historyPath)
+	if err != nil {
+		t.Fatalf("runhistory.Read() error = %v, want nil", err)
+	}
+	if len(records) != 1 || records[0].Success {
+		t.Fatalf("runhistory.Read() = %+v, want exactly 1 Success=false record", records)
+	}
+	if !strings.Contains(records[0].Error, "panic") {
+		t.Errorf("record.Error = %q, want it to mention the panic", records[0].Error)
+	}
+}
+
 // TestRun_UnwritableHistoryPath_DoesNotFailRun covers AE2/R6: pointing
 // HistoryPath at a location that can't be written to must not change Run's
 // returned error on an otherwise-successful run.
@@ -1032,5 +1077,42 @@ func TestRun_UnwritableHistoryPath_DoesNotFailRun(t *testing.T) {
 
 	if err := Run(t.Context(), deps); err != nil {
 		t.Fatalf("Run() error = %v, want nil (an unwritable HistoryPath must not fail an otherwise-successful run)", err)
+	}
+}
+
+// TestRun_UnwritableHistoryPath_PrintsWarning covers AE2's other half:
+// besides not failing the run, a persistence failure must also surface as a
+// warning on Stdout.
+func TestRun_UnwritableHistoryPath_PrintsWarning(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+	work := cloneWorkdir(t, remote, "solo")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+
+	blockerDir := t.TempDir()
+	blocker := filepath.Join(blockerDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seeding blocker file: %v", err)
+	}
+	historyPath := filepath.Join(blocker, "history.json")
+
+	var out bytes.Buffer
+	deps := RunDeps{
+		Config:      config.Config{Breakdown: config.BreakdownPerModel, RenderMode: config.RenderModeASCII},
+		Client:      &agentsview.Client{BinaryName: bin},
+		MachineID:   "machine-solo",
+		Now:         time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:     work,
+		HistoryPath: historyPath,
+		Stdout:      &out,
+	}
+
+	if err := Run(t.Context(), deps); err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "warning") || !strings.Contains(got, "recording run history failed") {
+		t.Errorf("Stdout = %q, want a warning that recording run history failed", got)
 	}
 }

@@ -110,9 +110,6 @@ func Write(targetRepo, machineID string, rows []Row) error {
 	}
 
 	dir := machineDir(targetRepo, machineID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating snapshot directory %s: %w", dir, err)
-	}
 
 	for k, fresh := range byChunk {
 		path := chunkPath(dir, k)
@@ -138,7 +135,7 @@ func Write(targetRepo, machineID string, rows []Row) error {
 		// killed mid-write (merge.go tolerates a corrupted file gracefully,
 		// but this avoids the data gap entirely rather than relying on that
 		// fallback).
-		if err := atomicfile.Write(dir, path, data); err != nil {
+		if err := atomicfile.Write(path, data); err != nil {
 			return fmt.Errorf("writing snapshot %s: %w", path, err)
 		}
 	}

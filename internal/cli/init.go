@@ -98,6 +98,12 @@ type InitDeps struct {
 	// live schedule is exactly the kind of non-reversible step a dry run
 	// must never reach.
 	DryRun bool
+	// HistoryPath is where Init records its scaffolding-plus-first-run
+	// outcome (R1), the same store `run` records to — an adopter's very
+	// first invocation is otherwise invisible to `status`. An empty value
+	// silently disables recording, mirroring RunDeps.HistoryPath's own
+	// nil-is-a-no-op convention.
+	HistoryPath string
 }
 
 // Init performs one-command setup (R10, R11, F3): it scaffolds the
@@ -121,12 +127,31 @@ type InitDeps struct {
 // user input, and holding the lock across an unbounded wait would starve a
 // concurrently-scheduled `run` for as long as the adopter takes to answer
 // (mirroring Cleanup's own confirm-before-lock ordering).
-func Init(ctx context.Context, deps InitDeps) error {
+//
+// Recording (mirroring Run's own KTD3 defer) wraps requireGitWorkTree and
+// initLocked's scaffolding-plus-first-run — not the earlier
+// errTargetRepoMissing check (which mirrors NewRunCmd's own pre-Run
+// validation, upstream of Run's recording boundary too) and not the
+// trailing offerScheduleRegistration (which never fails Init's own return —
+// a failed schedule install degrades to a warning, KTD17). A panic in that
+// span is recovered, recorded as a failure, and re-panicked, exactly as in
+// Run.
+func Init(ctx context.Context, deps InitDeps) (err error) {
 	if deps.Config.TargetRepo == "" {
 		return errTargetRepoMissing
 	}
 
-	if err := requireGitWorkTree(ctx, deps.RepoDir); err != nil {
+	defer func() {
+		histDeps := RunDeps{HistoryPath: deps.HistoryPath, Now: deps.Now, Stdout: deps.Stdout}
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+			recordRunOutcome(histDeps, err)
+			panic(r)
+		}
+		recordRunOutcome(histDeps, err)
+	}()
+
+	if err = requireGitWorkTree(ctx, deps.RepoDir); err != nil {
 		return err
 	}
 
@@ -579,7 +604,8 @@ func NewInitCmd() *cobra.Command {
 				Schedule: ScheduleDeps{
 					PlistPath: defaultLaunchdPlistPath(),
 				},
-				DryRun: dryRun,
+				DryRun:      dryRun,
+				HistoryPath: defaultHistoryPath(),
 			}
 			return Init(cmd.Context(), deps)
 		},

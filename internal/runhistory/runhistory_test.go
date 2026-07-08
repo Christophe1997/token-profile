@@ -25,7 +25,7 @@ func TestAppend_ThenRead_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v, want nil", err)
 	}
-	if len(got) != 1 || got[0] != rec {
+	if len(got) != 1 || !equalRecord(got[0], rec) {
 		t.Fatalf("Read() = %+v, want [%+v]", got, rec)
 	}
 }
@@ -91,9 +91,18 @@ func TestAppend_RoundTripsSuccessAndFailureRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v, want nil", err)
 	}
-	if len(got) != 2 || got[0] != ok || got[1] != fail {
+	if len(got) != 2 || !equalRecord(got[0], ok) || !equalRecord(got[1], fail) {
 		t.Fatalf("Read() = %+v, want [%+v %+v]", got, ok, fail)
 	}
+}
+
+// equalRecord compares two Records field-by-field, using time.Time.Equal
+// for Timestamp rather than struct ==/!=: a JSON round-trip strips
+// time.Now()'s monotonic reading, so == only happens to hold for the
+// time.Date(...)-sourced timestamps these tests use today, and would
+// silently fail for a time.Now()-sourced one.
+func equalRecord(a, b runhistory.Record) bool {
+	return a.Timestamp.Equal(b.Timestamp) && a.Success == b.Success && a.Error == b.Error
 }
 
 // TestAppend_UncreatableParentDir_ReturnsError covers the error path: when
@@ -131,6 +140,31 @@ func TestAppend_Read_UnmarshalError(t *testing.T) {
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Read() error = %v, want a decode error, not ErrNotExist", err)
+	}
+}
+
+// TestAppend_CorruptExisting_SelfHeals covers recovery from a corrupted
+// history file: rather than failing forever (which would silently and
+// permanently stop every future run from being recorded), Append treats
+// undecodable existing content as empty and starts fresh, mirroring
+// internal/snapshot.Merge's own tolerance for a corrupted chunk file.
+func TestAppend_CorruptExisting_SelfHeals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatalf("seeding corrupt file: %v", err)
+	}
+
+	rec := runhistory.Record{Timestamp: time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC), Success: true}
+	if err := runhistory.Append(path, rec); err != nil {
+		t.Fatalf("Append() error = %v, want nil (a corrupted existing file must self-heal)", err)
+	}
+
+	got, err := runhistory.Read(path)
+	if err != nil {
+		t.Fatalf("Read() error = %v, want nil", err)
+	}
+	if len(got) != 1 || !got[0].Timestamp.Equal(rec.Timestamp) || got[0].Success != rec.Success {
+		t.Fatalf("Read() = %+v, want exactly [%+v]", got, rec)
 	}
 }
 

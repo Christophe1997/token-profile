@@ -113,9 +113,21 @@ type RunDeps struct {
 // every exit path — including requireGitWorkTree and acquireRunLock's own
 // preflight failures, not just the inner run pipeline — so a silently
 // failing schedule (deleted target repo, a stuck lock) still shows up in
-// run history.
+// run history. A panic inside run(ctx, deps) is recovered, recorded as a
+// failure, and re-panicked: Go only assigns a named return from `return
+// expr` after expr evaluates without panicking, so without the recover the
+// deferred call would see err's zero value (nil) and misrecord a crash as
+// Success:true; re-panicking preserves the original crash/exit-code
+// behavior once recording is done.
 func Run(ctx context.Context, deps RunDeps) (err error) {
-	defer func() { recordRunOutcome(deps, err) }()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+			recordRunOutcome(deps, err)
+			panic(r)
+		}
+		recordRunOutcome(deps, err)
+	}()
 
 	if err = requireGitWorkTree(ctx, deps.RepoDir); err != nil {
 		return err
@@ -523,7 +535,7 @@ func NewRunCmd() *cobra.Command {
 				RepoDir:     cfg.TargetRepo,
 				Stdout:      cmd.OutOrStdout(),
 				DryRun:      dryRun,
-				HistoryPath: defaultStateFile("history.json"),
+				HistoryPath: defaultHistoryPath(),
 			}
 			return Run(cmd.Context(), deps)
 		},
@@ -538,6 +550,12 @@ func NewRunCmd() *cobra.Command {
 // ~/.token-profile/config.json.
 func defaultConfigPath() string {
 	return defaultStateFile("config.json")
+}
+
+// defaultHistoryPath returns the default run-history file location,
+// ~/.token-profile/history.json.
+func defaultHistoryPath() string {
+	return defaultStateFile("history.json")
 }
 
 // defaultStateFile returns name's path under token-profile's local state
