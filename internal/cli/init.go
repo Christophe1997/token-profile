@@ -172,6 +172,13 @@ func offerScheduleRegistration(ctx context.Context, deps InitDeps, interval time
 	sched.ConfigPath = deps.ConfigPath
 	sched.Interval = interval
 
+	if err := refuseIfPrivileged(); err != nil {
+		fmt.Fprintf(deps.Stdout,
+			"warning: %v (the snippet at %s is still available to install manually)\n",
+			err, deps.ScheduleDest)
+		return nil
+	}
+
 	if _, err := InstallSchedule(ctx, sched); err != nil {
 		fmt.Fprintf(deps.Stdout,
 			"warning: failed to register the refresh schedule: %v (the snippet at %s is still available to install manually)\n",

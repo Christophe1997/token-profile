@@ -106,6 +106,54 @@ func TestInit_ScheduleRegistrationAccepted_InstallFails_ReportsWarningExitsZero(
 	}
 }
 
+// TestInit_ScheduleRegistrationAccepted_RunningAsRoot_WarnsAndSkipsInstall
+// covers KTD16's own claim ("never sudo, never the system domain") being
+// enforced: accepting the prompt while running under an effective UID of 0
+// must degrade to a warning and never attempt InstallSchedule at all,
+// rather than silently targeting gui/0 or root's own crontab.
+func TestInit_ScheduleRegistrationAccepted_RunningAsRoot_WarnsAndSkipsInstall(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-root")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+	capturePath := filepath.Join(t.TempDir(), "capture")
+	launchctlBin := fakeLaunchctlBinary(t, filepath.Join(t.TempDir(), "state"), capturePath)
+
+	geteuid = func() int { return 0 }
+	defer func() { geteuid = os.Geteuid }()
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-root",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(t.TempDir(), "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil (running as root must degrade to a warning, not fail init)", err)
+	}
+	if !strings.Contains(stdout.String(), "warning") || !strings.Contains(stdout.String(), "root") {
+		t.Errorf("Init() Stdout = %q, want a warning mentioning root/sudo", stdout.String())
+	}
+	if captured := readCaptureFile(t, capturePath); len(captured) != 0 {
+		t.Errorf("launchctl invocations = %v, want none — install must never be attempted while running as root", captured)
+	}
+}
+
 // TestInit_ScheduleRegistrationDeclined_SnippetWrittenNoInstallAttempted
 // covers the declined-prompt integration scenario: the reviewable snippet
 // at --schedule-dest is still written regardless, but no live install is

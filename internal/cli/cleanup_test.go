@@ -368,6 +368,45 @@ func TestCleanup_ScheduleCheckFails_ReportedDistinctly(t *testing.T) {
 	}
 }
 
+// TestCleanup_RunningAsRoot_ScheduleDeregistrationRefused covers KTD16's own
+// claim ("never sudo, never the system domain") being enforced on the
+// cleanup side too: running under an effective UID of 0 must refuse the
+// schedule-deregistration attempt entirely (never even checking state, let
+// alone bootout/crontab), rather than silently operating against gui/0 or
+// root's own crontab. Repo-side cleanup is independent of the schedule
+// step (KTD6) and must still proceed.
+func TestCleanup_RunningAsRoot_ScheduleDeregistrationRefused(t *testing.T) {
+	dir := cleanupWorkdir(t)
+	schedule, capturePath := registeredLaunchdDeps(t)
+
+	geteuid = func() int { return 0 }
+	defer func() { geteuid = os.Geteuid }()
+
+	result, err := Cleanup(t.Context(), CleanupDeps{
+		RepoDir:     dir,
+		Schedule:    schedule,
+		Interactive: true,
+		Accessible:  true,
+		Input:       scriptedInput("y"),
+		Output:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("Cleanup() error = nil, want an error refusing schedule deregistration while running as root")
+	}
+	if !strings.Contains(err.Error(), "root") {
+		t.Errorf("Cleanup() error = %q, want it to mention root/sudo", err.Error())
+	}
+	if result.Schedule != ScheduleCheckFailed {
+		t.Errorf("result.Schedule = %v, want ScheduleCheckFailed", result.Schedule)
+	}
+	if !result.ReadmeStripped || !result.DirRemoved {
+		t.Errorf("result = %+v, want repo-side cleanup unaffected by the root refusal (KTD6)", result)
+	}
+	if captured := readCaptureFile(t, capturePath); len(captured) != 0 {
+		t.Errorf("launchctl invocations = %v, want none — schedule state must never be checked while running as root", captured)
+	}
+}
+
 // TestCleanup_NoTTY_FailsFast covers KTD12: cleanup requires an interactive
 // terminal and fails fast with no non-interactive override, touching
 // nothing at all.

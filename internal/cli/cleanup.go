@@ -198,6 +198,9 @@ func Cleanup(ctx context.Context, deps CleanupDeps) (CleanupResult, error) {
 // state is resolved exactly once — RemoveSchedule would otherwise re-derive
 // state it already has, forcing a second launchctl/crontab round-trip.
 func deregisterSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
+	if err := refuseIfPrivileged(); err != nil {
+		return ScheduleCheckFailed, err
+	}
 	before, cronContent, err := checkScheduleState(ctx, deps)
 	if err != nil {
 		return before, err

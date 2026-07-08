@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -83,6 +84,32 @@ func (d ScheduleDeps) goos() string {
 // session (confirmed firsthand — see the plan's Problem Frame).
 func launchctlDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+// geteuid resolves the process's effective UID — os.Geteuid by default,
+// overridable in tests so refuseIfPrivileged can be exercised without
+// requiring the test suite itself to run as root.
+var geteuid = os.Geteuid
+
+// errRunningAsRoot signals a schedule mutation attempted under an
+// effective UID of 0 (typically `sudo token-profile ...`). launchd's
+// gui/<uid> domain (KTD16, see launchctlDomain) and a user's own crontab
+// are both scoped to a real invoking user, not root — running as root
+// would silently target a nonexistent gui/0 session or root's own
+// (wrong) crontab instead of doing what the adopter actually asked for.
+var errRunningAsRoot = errors.New(
+	"refusing to register/deregister the schedule while running as root (e.g. via sudo) — re-run without sudo so it targets your own login session and crontab, not root's",
+)
+
+// refuseIfPrivileged guards every schedule-mutation entry point
+// (offerScheduleRegistration, deregisterSchedule) against running under
+// sudo/root — launchctlDomain's own doc comment says this must never
+// happen, but nothing previously enforced it.
+func refuseIfPrivileged() error {
+	if geteuid() == 0 {
+		return errRunningAsRoot
+	}
+	return nil
 }
 
 func launchctlServiceTarget(label string) string {
