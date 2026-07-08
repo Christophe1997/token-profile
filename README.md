@@ -107,9 +107,9 @@ token-profile init
 ```
 
 The first time you run this with no config file yet, `init` launches a short
-interactive wizard instead of failing: it asks for your GitHub username,
-clone protocol (https/ssh), and local clone path — each pre-filled with a
-sensible guess — then:
+interactive wizard: it asks for your GitHub username, clone protocol
+(https/ssh), and local clone path — each pre-filled with a sensible guess —
+then:
 
 1. Clones your profile repo into place (or adopts an existing clone already
    sitting at that path, as long as its remote matches what you entered).
