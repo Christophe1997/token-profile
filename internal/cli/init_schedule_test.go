@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,76 @@ func TestInit_ScheduleRegistrationAccepted_RunningAsRoot_WarnsAndSkipsInstall(t 
 	}
 	if captured := readCaptureFile(t, capturePath); len(captured) != 0 {
 		t.Errorf("launchctl invocations = %v, want none — install must never be attempted while running as root", captured)
+	}
+}
+
+// acquireOnReadReader wraps r, attempting acquireRunLock(repoDir) the first
+// time Read is called — used to prove a lock is already released by the
+// time a blocking prompt (backed by r) starts reading input, without
+// needing real concurrency or timing.
+type acquireOnReadReader struct {
+	r         io.Reader
+	repoDir   string
+	attempted bool
+	lockErr   error
+}
+
+func (a *acquireOnReadReader) Read(p []byte) (int, error) {
+	if !a.attempted {
+		a.attempted = true
+		release, err := acquireRunLock(a.repoDir)
+		a.lockErr = err
+		if err == nil {
+			release()
+		}
+	}
+	return a.r.Read(p)
+}
+
+// TestInit_ScheduleRegistrationPrompt_RunLockAlreadyReleased covers Init
+// releasing its run-lock before offering schedule registration, rather
+// than holding it through that prompt's unbounded wait on real user input.
+// Held-through-the-prompt would starve a concurrently-scheduled `run`
+// (whose own acquireRunLock would fail immediately) for as long as the
+// adopter takes to answer "Register the refresh schedule now?" — this
+// proves the lock is already free by simulating a second acquirer reading
+// from the very same Stdin the prompt itself is blocked on.
+func TestInit_ScheduleRegistrationPrompt_RunLockAlreadyReleased(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-lock")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+	capturePath := filepath.Join(t.TempDir(), "capture")
+	launchctlBin := fakeLaunchctlBinary(t, filepath.Join(t.TempDir(), "state"), capturePath)
+
+	input := &acquireOnReadReader{r: strings.NewReader("y\n"), repoDir: work}
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-lock",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		Stdout:         &stdout,
+		Stdin:          input,
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(t.TempDir(), "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+	if input.lockErr != nil {
+		t.Errorf("acquireRunLock() during the schedule-registration prompt error = %v, want nil", input.lockErr)
 	}
 }
 

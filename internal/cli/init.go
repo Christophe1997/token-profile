@@ -104,10 +104,16 @@ type InitDeps struct {
 // unit-testable without going through cobra.
 //
 // Like Run, Init validates deps.RepoDir is a git working tree and holds the
-// run-lock for its whole duration (Fix 2, Fix 3): one acquisition covers
-// both the scaffolding steps below and the first run, rather than calling
-// the exported Run (which would try to acquire the same lock a second time
-// and immediately self-conflict) — it calls the unlocked run core instead.
+// run-lock for the scaffolding steps and the first run (Fix 2, Fix 3), via
+// initLocked, rather than calling the exported Run (which would try to
+// acquire the same lock a second time and immediately self-conflict) — it
+// calls the unlocked run core instead.
+//
+// The lock is released before the schedule-registration prompt that
+// follows, not held through it: that prompt can block indefinitely on real
+// user input, and holding the lock across an unbounded wait would starve a
+// concurrently-scheduled `run` for as long as the adopter takes to answer
+// (mirroring Cleanup's own confirm-before-lock ordering).
 func Init(ctx context.Context, deps InitDeps) error {
 	if deps.Config.TargetRepo == "" {
 		return errTargetRepoMissing
@@ -117,19 +123,35 @@ func Init(ctx context.Context, deps InitDeps) error {
 		return err
 	}
 
-	release, err := acquireRunLock(deps.RepoDir)
+	interval := cmp.Or(deps.Config.ScheduleInterval, config.DefaultScheduleInterval)
+
+	dryRun, err := initLocked(ctx, deps, interval)
 	if err != nil {
 		return err
+	}
+	if dryRun {
+		return nil
+	}
+
+	return offerScheduleRegistration(ctx, deps, interval)
+}
+
+// initLocked performs every step that must happen under the run-lock:
+// scaffolding README markers and the scheduling-entry snippet, then the
+// first run itself. The lock is released as soon as this returns.
+func initLocked(ctx context.Context, deps InitDeps, interval time.Duration) (dryRun bool, err error) {
+	release, err := acquireRunLock(deps.RepoDir)
+	if err != nil {
+		return false, err
 	}
 	defer release()
 
 	if err := ensureReadmeMarkers(deps.RepoDir); err != nil {
-		return fmt.Errorf("scaffolding README markers: %w", err)
+		return false, fmt.Errorf("scaffolding README markers: %w", err)
 	}
 
-	interval := cmp.Or(deps.Config.ScheduleInterval, config.DefaultScheduleInterval)
 	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath, interval); err != nil {
-		return fmt.Errorf("scaffolding scheduling entry: %w", err)
+		return false, fmt.Errorf("scaffolding scheduling entry: %w", err)
 	}
 
 	if err := run(ctx, RunDeps{
@@ -141,14 +163,10 @@ func Init(ctx context.Context, deps InitDeps) error {
 		Stdout:    deps.Stdout,
 		DryRun:    deps.DryRun,
 	}); err != nil {
-		return err
+		return false, err
 	}
 
-	if deps.DryRun {
-		return nil
-	}
-
-	return offerScheduleRegistration(ctx, deps, interval)
+	return deps.DryRun, nil
 }
 
 // offerScheduleRegistration prompts (R4) whether to register the refresh
