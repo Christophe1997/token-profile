@@ -741,3 +741,116 @@ func TestCleanup_LockFileSurvivesTokenProfileDirDeletion_BlocksConcurrentAcquire
 	}
 	release2()
 }
+
+// TestPrintCleanupResult covers printCleanupResult's branches directly: the
+// declined short-circuit, each ScheduleState value, and the repo-invalid
+// short-circuit versus the two repo-side outcome flags — this function had
+// no direct test coverage at all before this table.
+func TestPrintCleanupResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		result CleanupResult
+		want   []string
+	}{
+		{
+			name:   "declined",
+			result: CleanupResult{Declined: true},
+			want:   []string{"cleanup cancelled — nothing changed"},
+		},
+		{
+			name:   "repo invalid, schedule removed",
+			result: CleanupResult{RepoValid: false, Schedule: ScheduleRegistered},
+			want:   []string{"schedule: removed", "target repo: missing or not a git repository"},
+		},
+		{
+			name:   "schedule check failed, repo valid, nothing stripped or removed",
+			result: CleanupResult{RepoValid: true, Schedule: ScheduleCheckFailed},
+			want:   []string{"schedule: could not determine live state", "README.md: nothing to strip", ".token-profile/: nothing to remove"},
+		},
+		{
+			name:   "schedule not registered, repo valid, readme stripped and dir removed",
+			result: CleanupResult{RepoValid: true, Schedule: ScheduleNotRegistered, ReadmeStripped: true, DirRemoved: true},
+			want:   []string{"schedule: nothing to remove", "README.md: markers stripped", ".token-profile/: removed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			printCleanupResult(&out, tt.result)
+			got := out.String()
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("printCleanupResult() output = %q, want it to contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestReportCleanupOutcome_NoTTYError_SkipsPrinting covers the one case
+// where nothing was ever attempted: printing the zero-value CleanupResult
+// here would be actively misleading (e.g. falsely implying the target repo
+// is invalid), so no output should be produced.
+func TestReportCleanupOutcome_NoTTYError_SkipsPrinting(t *testing.T) {
+	var out bytes.Buffer
+	err := reportCleanupOutcome(&out, CleanupResult{}, errCleanupRequiresTTY)
+	if !errors.Is(err, errCleanupRequiresTTY) {
+		t.Errorf("reportCleanupOutcome() error = %v, want errCleanupRequiresTTY", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("output = %q, want empty (nothing was attempted)", out.String())
+	}
+}
+
+// TestReportCleanupOutcome_ScheduleErrorWithRepoSuccess_StillPrintsSummary
+// is the direct regression test for the bug this fixes: NewCleanupCmd's
+// RunE previously returned Cleanup's error before ever calling
+// printCleanupResult, so an operator hitting a schedule-only failure never
+// learned that README.md was actually stripped and .token-profile/ was
+// actually deleted.
+func TestReportCleanupOutcome_ScheduleErrorWithRepoSuccess_StillPrintsSummary(t *testing.T) {
+	var out bytes.Buffer
+	scheduleErr := errors.New("removing schedule: launchctl bootout: exit status 1")
+	result := CleanupResult{RepoValid: true, Schedule: ScheduleCheckFailed, ReadmeStripped: true, DirRemoved: true}
+
+	err := reportCleanupOutcome(&out, result, scheduleErr)
+	if !errors.Is(err, scheduleErr) {
+		t.Errorf("reportCleanupOutcome() error = %v, want %v", err, scheduleErr)
+	}
+	for _, want := range []string{"README.md: markers stripped", ".token-profile/: removed"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output = %q, want it to contain %q despite the schedule error", out.String(), want)
+		}
+	}
+}
+
+// TestReportCleanupOutcome_Success_PrintsSummaryNoError covers the ordinary
+// success path unchanged.
+func TestReportCleanupOutcome_Success_PrintsSummaryNoError(t *testing.T) {
+	var out bytes.Buffer
+	result := CleanupResult{RepoValid: true, Schedule: ScheduleRegistered, ReadmeStripped: true, DirRemoved: true}
+
+	if err := reportCleanupOutcome(&out, result, nil); err != nil {
+		t.Errorf("reportCleanupOutcome() error = %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "schedule: removed") {
+		t.Errorf("output = %q, want it to report the schedule removal", out.String())
+	}
+}
+
+// TestNewCleanupCmd_RegistersConfigFlag is a flag-registration smoke test
+// mirroring this repo's own convention for cobra-command-level tests
+// (TestNewInitCmd_HasDryRunFlag, TestNewRunCmd_HasDryRunFlag) — NewCleanupCmd's
+// RunE itself resolves os.Stdin/config.Load internally with no injectable
+// seams, so it isn't unit-testable beyond its flag wiring; behavior is
+// covered by calling Cleanup directly, as every other test in this file does.
+func TestNewCleanupCmd_RegistersConfigFlag(t *testing.T) {
+	cmd := NewCleanupCmd()
+	if f := cmd.Flags().Lookup("config"); f == nil {
+		t.Error("NewCleanupCmd() does not register a --config flag, want one")
+	}
+	if cmd.Use != "cleanup" {
+		t.Errorf("NewCleanupCmd().Use = %q, want %q", cmd.Use, "cleanup")
+	}
+}

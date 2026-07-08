@@ -411,6 +411,22 @@ func printCleanupResult(w io.Writer, result CleanupResult) {
 	}
 }
 
+// reportCleanupOutcome prints result to w and returns err unchanged,
+// unless err is errCleanupRequiresTTY: in that one case nothing was ever
+// attempted, so result is still its zero value and printing it would be
+// actively misleading (e.g. falsely reporting the target repo as invalid).
+// Every other error Cleanup can return happens after confirmation, when
+// result already carries real, worth-reporting outcomes — so a schedule-only
+// failure, for instance, never hides that README.md/.token-profile/ were
+// actually touched.
+func reportCleanupOutcome(w io.Writer, result CleanupResult, err error) error {
+	if errors.Is(err, errCleanupRequiresTTY) {
+		return err
+	}
+	printCleanupResult(w, result)
+	return err
+}
+
 // NewCleanupCmd builds the `token-profile cleanup` cobra command: a thin
 // wrapper that loads the real config file, then delegates to Cleanup.
 // Mirrors NewRunCmd/NewInitCmd's own wiring pattern.
@@ -435,11 +451,7 @@ func NewCleanupCmd() *cobra.Command {
 				Interactive: isInteractive(os.Stdin),
 				Output:      cmd.OutOrStdout(),
 			})
-			if err != nil {
-				return err
-			}
-			printCleanupResult(cmd.OutOrStdout(), result)
-			return nil
+			return reportCleanupOutcome(cmd.OutOrStdout(), result, err)
 		},
 	}
 
