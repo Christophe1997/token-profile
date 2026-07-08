@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,7 +16,11 @@ import (
 	"github.com/Christophe1997/token-profile/internal/cli"
 )
 
-// version is overridden at build time via -ldflags.
+// version is overridden at build time via -ldflags by GoReleaser's own
+// build. It stays the "dev" sentinel for a plain `go build` or, notably,
+// `go install .../token-profile@latest` — the install path this repo's own
+// README documents — since neither passes ldflags; resolveVersion covers
+// that gap.
 var version = "dev"
 
 // runTimeout bounds a single invocation of token-profile's root command,
@@ -49,11 +54,28 @@ func execute(ctx context.Context, cmd *cobra.Command) error {
 	return cmd.ExecuteContext(ctx)
 }
 
+// resolveVersion returns the effective version: buildVersion as-is once
+// GoReleaser's ldflags have overridden the "dev" sentinel, otherwise the
+// resolved module version debug.ReadBuildInfo reports for a binary fetched
+// via `go install module@version` — falling back to buildVersion itself
+// when even that isn't available (a local `go build`, which leaves
+// info.Main.Version as the literal string "(devel)").
+func resolveVersion(buildVersion string, info *debug.BuildInfo, ok bool) string {
+	if buildVersion != "dev" {
+		return buildVersion
+	}
+	if ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return buildVersion
+}
+
 func newRootCmd() *cobra.Command {
+	info, ok := debug.ReadBuildInfo()
 	root := &cobra.Command{
 		Use:     "token-profile",
 		Short:   "Render a GitHub profile dashboard card from local AI coding usage data",
-		Version: version,
+		Version: resolveVersion(version, info, ok),
 	}
 	root.AddCommand(cli.NewRunCmd())
 	root.AddCommand(cli.NewInitCmd())
