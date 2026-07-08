@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -161,11 +162,59 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 
+	targetRepo, err := ResolvePath(cfg.TargetRepo)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving targetRepo in config %s: %w", path, err)
+	}
+	cfg.TargetRepo = targetRepo
+
+	machineIDPath, err := ResolvePath(cfg.MachineIDPath)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving machineIdPath in config %s: %w", path, err)
+	}
+	cfg.MachineIDPath = machineIDPath
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validating config %s: %w", path, err)
 	}
 
 	return cfg, nil
+}
+
+// ResolvePath rewrites a non-blank path into an absolute path, the same two
+// steps an interactive shell applies to a typed-in path: a leading "~" or
+// "~/" resolves against the caller's home directory, then anything still
+// relative resolves against the process's current working directory. It
+// exists because paths accepted from config.json or the init wizard's form
+// never pass through a shell, so a literal "~" or a bare relative path
+// would otherwise reach os/exec and path/filepath exactly as typed — a "~"
+// read as an ordinary directory named "~" rather than home, and a relative
+// path silently reinterpreted against whatever directory happens to be
+// current each time it's used, rather than the one directory it was meant
+// to name. A blank path is left blank, preserving "unconfigured" as a
+// distinct state from any real path. "~otheruser"-style paths are left
+// unexpanded (rare, and os.UserHomeDir has no notion of other users' homes)
+// before falling through to the relative-path step like any other path.
+func ResolvePath(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving home directory for %q: %w", path, err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving absolute path for %q: %w", path, err)
+	}
+	return abs, nil
 }
 
 // Validate reports whether cfg holds a recognized breakdown mode, render

@@ -63,6 +63,110 @@ func TestLoad_ValidFileOverridesDefaults(t *testing.T) {
 	}
 }
 
+// TestLoad_ExpandsTildeInTargetRepoAndMachineIDPath covers a hand-edited
+// config.json using a shell-style "~/..." path: json.Unmarshal never passes
+// it through a shell, so without expansion it would reach gitops/machineid
+// as a literal directory named "~".
+func TestLoad_ExpandsTildeInTargetRepoAndMachineIDPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{
+		"targetRepo": "~/code/username",
+		"machineIdPath": "~/.token-profile/machine-id"
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	wantTargetRepo := filepath.Join(home, "code", "username")
+	if cfg.TargetRepo != wantTargetRepo {
+		t.Errorf("Load() TargetRepo = %q, want %q", cfg.TargetRepo, wantTargetRepo)
+	}
+	wantMachineIDPath := filepath.Join(home, ".token-profile", "machine-id")
+	if cfg.MachineIDPath != wantMachineIDPath {
+		t.Errorf("Load() MachineIDPath = %q, want %q", cfg.MachineIDPath, wantMachineIDPath)
+	}
+}
+
+// TestLoad_ResolvesRelativeTargetRepoToAbsoluteAtLoadTime covers a
+// hand-edited config.json using a bare relative path: since it never
+// passes through a shell, Load must anchor it to the process's own working
+// directory at load time (the same anchor a shell would use), rather than
+// leaving it relative and letting every downstream git/filepath call
+// re-interpret it against whatever directory happens to be current then.
+func TestLoad_ResolvesRelativeTargetRepoToAbsoluteAtLoadTime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"targetRepo": "relative/username"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	want := filepath.Join(wd, "relative", "username")
+	if cfg.TargetRepo != want {
+		t.Errorf("Load() TargetRepo = %q, want %q", cfg.TargetRepo, want)
+	}
+}
+
+// TestResolvePath covers ResolvePath's own contract in isolation: a leading
+// "~"/"~/" resolves against home, then anything still relative resolves
+// against the process's current working directory, so the result is always
+// either blank or absolute.
+func TestResolvePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare tilde", "~", home},
+		{"tilde slash path", "~/code/repo", filepath.Join(home, "code", "repo")},
+		{"already absolute", "/already/absolute", "/already/absolute"},
+		{"relative path anchors to cwd", "relative/path", filepath.Join(wd, "relative", "path")},
+		{"dot anchors to cwd", ".", wd},
+		{"blank stays blank", "", ""},
+		{"tilde-user form anchors to cwd as a literal path", "~otheruser/path", filepath.Join(wd, "~otheruser", "path")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := config.ResolvePath(tt.in)
+			if err != nil {
+				t.Fatalf("ResolvePath(%q) error = %v, want nil", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolvePath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestLoad_NegativeBreakdownLimitMeansUnlimited covers the sentinel: a
 // negative breakdownLimit must load as-is (not rejected, not coerced to the
 // default), since callers treat negative as "show every entry."
@@ -324,7 +428,9 @@ func TestWriteTemplate_NonEmptyTargetRepo_RoundTripsThroughLoad(t *testing.T) {
 
 func TestWriteTemplate_TargetRepoWithBackslashesAndQuotes_RoundTripsThroughLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	const targetRepo = `C:\Users\you\code\"you"`
+	// An absolute path (ResolvePath is a no-op on it) still carrying the
+	// backslashes/quotes raw string templating would have corrupted.
+	const targetRepo = `/home/you/weird\code\"you"`
 
 	if err := config.WriteTemplate(path, config.TemplateFields{TargetRepo: targetRepo}); err != nil {
 		t.Fatalf("WriteTemplate() error = %v, want nil", err)

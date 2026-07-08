@@ -156,6 +156,11 @@ func RunWizard(ctx context.Context, deps WizardDeps) (WizardResult, error) {
 			"invalid GitHub username/handle %q (want alphanumeric/hyphen, no leading/trailing hyphen, max 39 characters)", repo)
 	}
 
+	localPath, err := config.ResolvePath(localPath)
+	if err != nil {
+		return WizardResult{}, fmt.Errorf("resolving local clone path: %w", err)
+	}
+
 	if !confirmed {
 		return WizardResult{}, ErrWizardCancelled
 	}
