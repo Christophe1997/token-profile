@@ -69,6 +69,21 @@ func cloneOrAdopt(ctx context.Context, url, dest string) (string, error) {
 		)
 	}
 
+	// A matching origin alone isn't sufficient to adopt: an interrupted or
+	// never-completed clone (e.g. `git init && git remote add origin <url>`,
+	// or a `git clone` killed before the object transfer/checkout finished)
+	// satisfies hasGitDir and the origin check above with zero commits ever
+	// fetched. Silently adopting that empty shell would let
+	// ensureReadmeMarkers fabricate a brand-new README as if this were a
+	// genuinely fresh repo, discarding all context that the real remote
+	// already has history.
+	if _, err := headCommit(ctx, dest); err != nil {
+		return "", fmt.Errorf(
+			"clone destination %q has a matching %q remote but no commits — it looks like an interrupted or incomplete clone; remove it and retry, or fetch it manually before re-running init: %w",
+			dest, "origin", err,
+		)
+	}
+
 	return fmt.Sprintf("adopted existing clone at %s (origin already matches %s)", dest, url), nil
 }
 

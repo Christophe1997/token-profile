@@ -82,6 +82,25 @@ func TestCloneOrAdopt_ClonesIntoExistingEmptyDir(t *testing.T) {
 	}
 }
 
+// TestCloneOrAdopt_ErrorsOnDestIsAFile covers dest existing as a plain
+// file rather than a directory (e.g. targetRepo pointed at the wrong path
+// by mistake) — os.ReadDir would fail confusingly on a file, so
+// cloneOrAdopt must reject this case with an actionable message before
+// getting that far.
+func TestCloneOrAdopt_ErrorsOnDestIsAFile(t *testing.T) {
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "not-a-directory")
+	writeFile(t, parent, "not-a-directory", "I am a file, not a directory\n")
+
+	status, err := cloneOrAdopt(t.Context(), "https://example.invalid/repo.git", dest)
+	if err == nil {
+		t.Fatalf("cloneOrAdopt() error = nil, status = %q, want a not-a-directory error", status)
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error = %q, want it to say dest is not a directory", err.Error())
+	}
+}
+
 // TestCloneOrAdopt_ErrorsOnMismatchedOrigin covers dest already being a git
 // working tree, but a clone of a *different* repo than the resolved
 // url — e.g. a stale leftover from a previous, differently-configured
@@ -212,6 +231,32 @@ func TestCloneOrAdopt_MismatchedOriginError_RedactsCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "github.com/someone/somerepo.git") {
 		t.Errorf("error %q should still name the redacted origin host/path for debugging", err.Error())
+	}
+}
+
+// TestCloneOrAdopt_ErrorsOnMatchingOriginButNoCommits covers dest looking
+// like an interrupted or never-completed clone: a matching origin remote is
+// configured, but no commits were ever fetched (exactly what `git init &&
+// git remote add origin <url>` leaves behind, or a `git clone` killed
+// before the object transfer/checkout finished). cloneOrAdopt must not
+// treat a matching origin alone as sufficient to adopt — an empty shell
+// silently "adopted" here would let ensureReadmeMarkers fabricate a
+// brand-new README as if this were a genuinely fresh repo, discarding all
+// context that the real remote already has history.
+func TestCloneOrAdopt_ErrorsOnMatchingOriginButNoCommits(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, markedReadme)
+
+	dest := t.TempDir()
+	runGitT(t, dest, "init", "-q", "-b", "main", dest)
+	runGitT(t, dest, "remote", "add", "origin", remote)
+
+	status, err := cloneOrAdopt(t.Context(), remote, dest)
+	if err == nil {
+		t.Fatalf("cloneOrAdopt() error = nil, status = %q, want an incomplete-clone error", status)
+	}
+	if !strings.Contains(err.Error(), "no commits") {
+		t.Errorf("error = %q, want it to explain dest has no commits", err.Error())
 	}
 }
 
