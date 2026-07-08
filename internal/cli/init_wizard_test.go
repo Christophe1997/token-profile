@@ -369,3 +369,13 @@ func TestNewInitCmd_HasDryRunFlag(t *testing.T) {
 		t.Error("NewInitCmd() does not register a --dry-run flag, want one (R8)")
 	}
 }
+
+// TestNewInitCmd_HasRegisterScheduleFlag covers the agent-native escape
+// hatch: an unattended re-run of `init` (no TTY) needs a way to opt into
+// InstallSchedule without going through the interactive Y/N prompt.
+func TestNewInitCmd_HasRegisterScheduleFlag(t *testing.T) {
+	cmd := NewInitCmd()
+	if f := cmd.Flags().Lookup("register-schedule"); f == nil {
+		t.Error("NewInitCmd() does not register a --register-schedule flag, want one")
+	}
+}

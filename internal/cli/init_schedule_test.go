@@ -267,3 +267,61 @@ func TestInit_ScheduleRegistrationDeclined_SnippetWrittenNoInstallAttempted(t *t
 		t.Errorf("Init() Stdout = %q, want no install-failure warning when declined", stdout.String())
 	}
 }
+
+// TestInit_RegisterScheduleFlag_InstallsWithoutPromptEvenWithoutTTY covers
+// the agent-native gap: with PromptSchedule false (no TTY, e.g. an
+// unattended re-run of init from a provisioning script) and RegisterSchedule
+// true, the schedule must still be installed directly, with no interactive
+// prompt shown — the explicit flag is the escape hatch A2 (an unattended
+// scheduler) needs to opt into InstallSchedule without a terminal.
+func TestInit_RegisterScheduleFlag_InstallsWithoutPromptEvenWithoutTTY(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-unattended")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	schedDir := t.TempDir()
+	statePath := filepath.Join(schedDir, "state")
+	capturePath := filepath.Join(schedDir, "capture")
+	launchctlBin := fakeLaunchctlBinary(t, statePath, capturePath)
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:       config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:       &agentsview.Client{BinaryName: bin},
+		MachineID:    "machine-sched-unattended",
+		Now:          time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:      work,
+		ScheduleDest: scheduleDest,
+		BinaryPath:   "/usr/local/bin/token-profile",
+		ConfigPath:   "/config.json",
+		Stdout:       &stdout,
+		Stdin:        nil, // no TTY at all -- an unattended invocation
+		// PromptSchedule intentionally left false: no interactive session.
+		RegisterSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: filepath.Join(schedDir, "schedule.plist"),
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+	if strings.Contains(stdout.String(), "Register the refresh schedule now?") {
+		t.Errorf("Init() Stdout = %q, want the interactive prompt skipped when RegisterSchedule is set", stdout.String())
+	}
+
+	captured := readCaptureFile(t, capturePath)
+	foundBootstrap := false
+	for _, line := range captured {
+		if strings.HasPrefix(line, "bootstrap ") {
+			foundBootstrap = true
+		}
+	}
+	if !foundBootstrap {
+		t.Errorf("captured launchctl invocations = %v, want a bootstrap call despite no TTY being present", captured)
+	}
+}

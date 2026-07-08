@@ -79,6 +79,13 @@ type InitDeps struct {
 	// tests can drive the prompt through a plain strings.Reader — isInteractive
 	// would otherwise always report false for such a fixture.
 	PromptSchedule bool
+	// RegisterSchedule, when true, installs the refresh schedule directly —
+	// skipping the interactive Y/N prompt entirely, regardless of
+	// PromptSchedule — so an unattended re-run of init (e.g. from a
+	// provisioning script, with no TTY present) can still opt into
+	// InstallSchedule. Set via --register-schedule; false is the default
+	// no-op, preserving today's prompt-or-skip behavior.
+	RegisterSchedule bool
 	// Schedule carries the live schedule-registration's install-time
 	// parameters not already covered above: PlistPath (the real LaunchAgents
 	// location InstallSchedule targets, darwin only) plus Launchctl/Crontab
@@ -171,17 +178,21 @@ func initLocked(ctx context.Context, deps InitDeps, interval time.Duration) (dry
 
 // offerScheduleRegistration prompts (R4) whether to register the refresh
 // schedule after a successful init, installing it via InstallSchedule on
-// yes. A failed install attempt degrades to a warning rather than a
-// non-zero exit (KTD17): by this point clone, config, and the first publish
-// have already succeeded, so scheduling is best-effort auxiliary setup the
-// adopter can retry, or install manually from the already-written
-// --schedule-dest snippet.
+// yes. RegisterSchedule bypasses the prompt entirely — an unattended re-run
+// has no TTY to prompt on, so it opts in ahead of time instead. A failed
+// install attempt degrades to a warning rather than a non-zero exit
+// (KTD17): by this point clone, config, and the first publish have already
+// succeeded, so scheduling is best-effort auxiliary setup the adopter can
+// retry, or install manually from the already-written --schedule-dest
+// snippet.
 func offerScheduleRegistration(ctx context.Context, deps InitDeps, interval time.Duration) error {
-	if !deps.PromptSchedule {
-		return nil
-	}
-	if !confirmYesNo(deps.Stdin, deps.Stdout, "Register the refresh schedule now?") {
-		return nil
+	if !deps.RegisterSchedule {
+		if !deps.PromptSchedule {
+			return nil
+		}
+		if !confirmYesNo(deps.Stdin, deps.Stdout, "Register the refresh schedule now?") {
+			return nil
+		}
 	}
 
 	sched := deps.Schedule
@@ -513,6 +524,7 @@ func NewInitCmd() *cobra.Command {
 	var configPath string
 	var scheduleDest string
 	var dryRun bool
+	var registerSchedule bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -546,17 +558,18 @@ func NewInitCmd() *cobra.Command {
 			}
 
 			deps := InitDeps{
-				Config:         cfg,
-				Client:         &agentsview.Client{},
-				MachineID:      machineID,
-				Now:            time.Now().UTC(),
-				RepoDir:        cfg.TargetRepo,
-				ScheduleDest:   scheduleDest,
-				BinaryPath:     binaryPath,
-				ConfigPath:     configPath,
-				Stdout:         cmd.OutOrStdout(),
-				Stdin:          os.Stdin,
-				PromptSchedule: interactive,
+				Config:           cfg,
+				Client:           &agentsview.Client{},
+				MachineID:        machineID,
+				Now:              time.Now().UTC(),
+				RepoDir:          cfg.TargetRepo,
+				ScheduleDest:     scheduleDest,
+				BinaryPath:       binaryPath,
+				ConfigPath:       configPath,
+				Stdout:           cmd.OutOrStdout(),
+				Stdin:            os.Stdin,
+				PromptSchedule:   interactive,
+				RegisterSchedule: registerSchedule,
 				Schedule: ScheduleDeps{
 					PlistPath: defaultLaunchdPlistPath(),
 				},
@@ -569,5 +582,6 @@ func NewInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", defaultConfigPath(), "path to token-profile's config file")
 	cmd.Flags().StringVar(&scheduleDest, "schedule-dest", defaultScheduleDest(), "path to write the scheduling entry snippet")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "perform every write (clone, config, README) but stop before committing/pushing, and skip the schedule-registration prompt")
+	cmd.Flags().BoolVar(&registerSchedule, "register-schedule", false, "install the refresh schedule without prompting (usable non-interactively, e.g. from a provisioning script or an unattended re-run of init)")
 	return cmd
 }
