@@ -31,10 +31,14 @@ type Summary struct {
 // Compute derives Summary from ds. asOf stands in for "today" (UTC) when
 // walking the streak backward and scoping window; production call sites
 // pass time.Now().UTC() while tests pass a fixed time so results stay
-// deterministic. window bounds TotalTokens/TotalCost to [asOf-window, asOf]
-// and defines the immediately preceding window compared against for
-// TokenChangePct/CostChangePct; it does not bound the streak, which reports
-// however many consecutive active days ds's full history actually has.
+// deterministic. window bounds TotalTokens/TotalCost to (asOf-window, asOf]
+// — asOf-window's own calendar day belongs to the *previous*, equal-length
+// window compared against for TokenChangePct/CostChangePct, not the
+// current one (mirroring snapshot.FilterSince's own exclusive cutoff day):
+// keeping it in both would make the current window span window+1 days
+// while the previous window stays window days wide, biasing the
+// comparison. window does not bound the streak, which reports however many
+// consecutive active days ds's full history actually has.
 func Compute(ds snapshot.MergedDataset, asOf time.Time, window time.Duration) Summary {
 	currentSince := civilDate(asOf.Add(-window))
 	previousSince := civilDate(asOf.Add(-2 * window))
@@ -51,10 +55,10 @@ func Compute(ds snapshot.MergedDataset, asOf time.Time, window time.Duration) Su
 			active[d] = true // zero-usage rows don't mark a day active (matches Resolve's own omission convention)
 		}
 		switch {
-		case !d.Before(currentSince):
+		case d.After(currentSince):
 			currentTokens += r.Tokens
 			currentCost += r.Cost
-		case !d.Before(previousSince):
+		case d.After(previousSince):
 			previousTokens += r.Tokens
 			previousCost += r.Cost
 		}

@@ -126,16 +126,21 @@ func mergeRowsByKey(existing, fresh []Row) []Row {
 	return rows
 }
 
-// FilterSince returns the subset of ds.Rows dated on or after since
-// (inclusive), preserving order — the window-scoping step cli/run.go
+// FilterSince returns the subset of ds.Rows dated strictly after since's own
+// calendar day, preserving order — the window-scoping step cli/run.go
 // applies to an accumulated (potentially multi-window) MergedDataset before
 // handing it to render.Render, so trend/breakdown reflect only the current
-// window rather than a machine's full accumulated history.
+// window rather than a machine's full accumulated history. since's calendar
+// day itself is excluded (not just days strictly before it): a window of N
+// is computed upstream as asOf.Add(-window), landing exactly N calendar
+// days before "now" — keeping that boundary day too would span N+1 days,
+// not N (the off-by-one render.titleLine's "last N days" label previously
+// surfaced whenever a caller passed the exact window boundary as since).
 func FilterSince(ds MergedDataset, since time.Time) MergedDataset {
 	cutoff := since.UTC().Format(time.DateOnly)
 	var out MergedDataset
 	for _, r := range ds.Rows {
-		if r.Date >= cutoff {
+		if r.Date > cutoff {
 			out.Rows = append(out.Rows, r)
 		}
 	}

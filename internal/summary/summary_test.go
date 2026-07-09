@@ -159,9 +159,9 @@ func TestCompute_ChangePct_ComputesVsPreviousWindow(t *testing.T) {
 	window := 7 * 24 * time.Hour
 	asOf := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
 	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
-		// previous window: 2026-06-06 through 2026-06-12 (inclusive)
+		// previous window: 2026-06-07 through 2026-06-13
 		{Date: "2026-06-10", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 10.0},
-		// current window: 2026-06-13 through 2026-06-20 (inclusive of asOf)
+		// current window: 2026-06-14 through 2026-06-20 (inclusive of asOf)
 		{Date: "2026-06-19", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 150, Cost: 5.0},
 	}}
 
@@ -172,6 +172,31 @@ func TestCompute_ChangePct_ComputesVsPreviousWindow(t *testing.T) {
 	}
 	if got.CostChangePct == nil || *got.CostChangePct != -50 {
 		t.Errorf("Compute().CostChangePct = %v, want -50 (5.0 vs 10.0 previous = -50%%)", got.CostChangePct)
+	}
+}
+
+// TestCompute_CurrentWindow_ExcludesCutoffDay covers the fencepost fix
+// mirroring snapshot.FilterSince: a row dated exactly window before asOf
+// (the boundary day) must fall into the *previous* window, not the current
+// one — otherwise the current window spans window+1 days instead of
+// window, and comparing it against a previous window of the correct width
+// biases TokenChangePct/CostChangePct.
+func TestCompute_CurrentWindow_ExcludesCutoffDay(t *testing.T) {
+	window := 7 * 24 * time.Hour
+	asOf := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		// exactly `window` before asOf -- the boundary day itself
+		{Date: "2026-06-13", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-19", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 20, Cost: 0.2},
+	}}
+
+	got := summary.Compute(ds, asOf, window)
+
+	if got.TotalTokens != 20 || got.TotalCost != 0.2 {
+		t.Errorf("Compute() totals = (%d, %v), want (20, 0.2) (2026-06-13 is the window boundary day and belongs to the previous window, not the current one)", got.TotalTokens, got.TotalCost)
+	}
+	if got.TokenChangePct == nil || *got.TokenChangePct != -80 {
+		t.Errorf("Compute().TokenChangePct = %v, want -80 (20 vs previous 100 = -80%%)", got.TokenChangePct)
 	}
 }
 

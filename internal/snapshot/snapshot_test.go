@@ -409,10 +409,15 @@ func TestWrite_CorruptedExistingSnapshot_FailsRatherThanDiscardingHistory(t *tes
 	}
 }
 
-// TestFilterSince_KeepsOnlyRowsOnOrAfterCutoff covers the window-filtering
+// TestFilterSince_KeepsOnlyRowsAfterCutoffDay covers the window-filtering
 // helper cli/run.go uses to scope an accumulated (potentially multi-window)
-// MergedDataset down to "the current window" before rendering.
-func TestFilterSince_KeepsOnlyRowsOnOrAfterCutoff(t *testing.T) {
+// MergedDataset down to "the current window" before rendering. since's own
+// calendar day is excluded — not just days strictly before it — so a
+// window of N (e.g. trailingWindow's default 720h/30 days) keeps exactly N
+// calendar days of rows counting back from "now" (asOf.Add(-window) lands
+// exactly N days before today; excluding that day too, rather than keeping
+// it, is what makes the kept span N days instead of N+1).
+func TestFilterSince_KeepsOnlyRowsAfterCutoffDay(t *testing.T) {
 	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
 		{Date: "2026-05-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
 		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
@@ -423,7 +428,6 @@ func TestFilterSince_KeepsOnlyRowsOnOrAfterCutoff(t *testing.T) {
 	got := snapshot.FilterSince(ds, since)
 
 	want := []snapshot.Row{
-		{Date: "2026-06-20", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 50, Cost: 0.5},
 		{Date: "2026-06-21", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 60, Cost: 0.6},
 	}
 	if len(got.Rows) != len(want) {
