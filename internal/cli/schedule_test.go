@@ -25,7 +25,10 @@ func shQuote(s string) string {
 // and appends each invocation's argument line to capturePath, so tests can
 // assert the exact domain string used (KTD16). `print` reports registered
 // (exit 0) when statePath exists, or "Could not find service" (exit 1)
-// otherwise — mirroring real launchctl's not-found phrasing.
+// otherwise — mirroring real launchctl's not-found phrasing. `bootstrap`
+// against an already-loaded label fails ("service already bootstrapped"),
+// mirroring real launchd — this forces a reconciling InstallSchedule to
+// `bootout` first rather than bootstrap on top of a stale live job.
 func fakeLaunchctlBinary(t *testing.T, statePath, capturePath string) string {
 	t.Helper()
 	script := "#!/bin/sh\n" +
@@ -40,6 +43,10 @@ func fakeLaunchctlBinary(t *testing.T, statePath, capturePath string) string {
 		"    exit 1\n" +
 		"    ;;\n" +
 		"  bootstrap)\n" +
+		"    if [ -f " + shQuote(statePath) + " ]; then\n" +
+		"      echo \"service already bootstrapped\" >&2\n" +
+		"      exit 1\n" +
+		"    fi\n" +
 		"    touch " + shQuote(statePath) + "\n" +
 		"    exit 0\n" +
 		"    ;;\n" +
@@ -346,10 +353,17 @@ func TestScheduleRoundTrip_Cron_PreservesUnrelatedEntries(t *testing.T) {
 	}
 }
 
-// TestInstallSchedule_Darwin_AlreadyRegistered_NoOp covers re-running
-// InstallSchedule against an already-bootstrapped job: it must no-op
-// (never invoke `bootstrap` a second time) and still report success.
-func TestInstallSchedule_Darwin_AlreadyRegistered_NoOp(t *testing.T) {
+// TestInstallSchedule_Darwin_Reregister_ReloadsStaleJob covers the incident
+// this fixes: re-running InstallSchedule against an already-bootstrapped job
+// (e.g. `init --register-schedule` re-run after `go install`ing a fresh
+// binary) must reload it — `bootout` then `bootstrap` — rather than treating
+// "a job with this label is loaded" as good enough and leaving it running
+// against whatever ProgramArguments/PATH it was loaded with the first time.
+// Before this fix, InstallSchedule blindly no-opped on an already-registered
+// job: editing the plist file on disk never took effect until the job was
+// manually reloaded, which is exactly how a real deployment kept spawning a
+// since-deleted binary and silently stopped refreshing for over a day.
+func TestInstallSchedule_Darwin_Reregister_ReloadsStaleJob(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state")
 	capturePath := filepath.Join(dir, "capture")
@@ -369,20 +383,98 @@ func TestInstallSchedule_Darwin_AlreadyRegistered_NoOp(t *testing.T) {
 	}
 
 	calls := readCaptureFile(t, capturePath)
-	bootstrapCalls := 0
+	var bootstraps, bootouts int
 	for _, call := range calls {
-		if strings.HasPrefix(call, "bootstrap ") {
-			bootstrapCalls++
+		switch {
+		case strings.HasPrefix(call, "bootstrap "):
+			bootstraps++
+		case strings.HasPrefix(call, "bootout "):
+			bootouts++
 		}
 	}
-	if bootstrapCalls != 1 {
-		t.Errorf("launchctl bootstrap invoked %d times across two InstallSchedule() calls, want exactly 1 (idempotent no-op on the second)", bootstrapCalls)
+	if bootstraps != 2 {
+		t.Errorf("launchctl bootstrap invoked %d times across two InstallSchedule() calls, want 2 (the second must reload, not no-op)", bootstraps)
+	}
+	if bootouts != 1 {
+		t.Errorf("launchctl bootout invoked %d times across two InstallSchedule() calls, want 1 (only ahead of the reload)", bootouts)
+	}
+}
+
+// TestInstallSchedule_Darwin_BinaryPathChange_UpdatesPlist covers the
+// concrete drift scenario the reload fixes: a changed BinaryPath (e.g.
+// switching from a dev build to the properly `go install`ed binary) must
+// land in the live plist on a re-register, not just the file that was
+// already correct before this fix existed.
+func TestInstallSchedule_Darwin_BinaryPathChange_UpdatesPlist(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeLaunchctlBinary(t, statePath, capturePath)
+	deps := darwinDeps(t, bin)
+
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("first InstallSchedule() error = %v, want nil", err)
+	}
+
+	deps.BinaryPath = "/Users/example/go/bin/token-profile"
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("second InstallSchedule() error = %v, want nil", err)
+	}
+
+	plist, err := os.ReadFile(deps.PlistPath)
+	if err != nil {
+		t.Fatalf("ReadFile(plist) error = %v", err)
+	}
+	if !strings.Contains(string(plist), "/Users/example/go/bin/token-profile") {
+		t.Errorf("plist = %q, want it to reflect the updated BinaryPath", plist)
+	}
+	if strings.Contains(string(plist), "/usr/local/bin/token-profile") {
+		t.Errorf("plist = %q, want the stale BinaryPath gone", plist)
+	}
+}
+
+// TestInstallSchedule_Darwin_PathEnv_WrittenToPlist covers PATH propagation:
+// a configured PathEnv must land in the plist's EnvironmentVariables dict,
+// so `agentsview` (commonly at /opt/homebrew/bin, outside launchd's default
+// minimal PATH) still resolves when the scheduled job runs.
+func TestInstallSchedule_Darwin_PathEnv_WrittenToPlist(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeLaunchctlBinary(t, statePath, capturePath)
+	deps := darwinDeps(t, bin)
+	deps.PathEnv = "/opt/homebrew/bin:/usr/bin:/bin"
+
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("InstallSchedule() error = %v, want nil", err)
+	}
+
+	plist, err := os.ReadFile(deps.PlistPath)
+	if err != nil {
+		t.Fatalf("ReadFile(plist) error = %v", err)
+	}
+	if !strings.Contains(string(plist), "<key>EnvironmentVariables</key>") {
+		t.Errorf("plist = %q, want an EnvironmentVariables dict", plist)
+	}
+	if !strings.Contains(string(plist), "/opt/homebrew/bin:/usr/bin:/bin") {
+		t.Errorf("plist = %q, want it to contain the configured PathEnv", plist)
+	}
+}
+
+// TestLaunchdPlist_NoPathEnv_OmitsEnvironmentVariables covers the pure
+// template function directly: an unset PathEnv must omit the
+// EnvironmentVariables key entirely rather than emit an empty one.
+func TestLaunchdPlist_NoPathEnv_OmitsEnvironmentVariables(t *testing.T) {
+	got := launchdPlist(ScheduleDeps{Label: "l", BinaryPath: "/bin/x", ConfigPath: "/c.json", Interval: time.Hour})
+	if strings.Contains(got, "EnvironmentVariables") {
+		t.Errorf("launchdPlist() = %q, want no EnvironmentVariables key when PathEnv is empty", got)
 	}
 }
 
 // TestInstallSchedule_Cron_AlreadyRegistered_NoOp mirrors
-// TestInstallSchedule_Darwin_AlreadyRegistered_NoOp for the crontab
-// mechanism: a second install must not duplicate the managed entry.
+// TestInstallSchedule_Darwin_Reregister_ReloadsStaleJob for the crontab
+// mechanism: a second install reconciles the managed entry in place
+// (strip-then-append) rather than duplicating it.
 func TestInstallSchedule_Cron_AlreadyRegistered_NoOp(t *testing.T) {
 	dir := t.TempDir()
 	crontabPath := filepath.Join(dir, "crontab.txt")
@@ -454,6 +546,67 @@ func TestRemoveSchedule_Cron_NothingRegistered_NoOp(t *testing.T) {
 	}
 	if _, err := os.Stat(crontabPath); !os.IsNotExist(err) {
 		t.Errorf("crontab file exists after a no-op RemoveSchedule(), want it left untouched (absent)")
+	}
+}
+
+// TestInstallSchedule_Cron_BinaryPathChange_UpdatesEntry mirrors
+// TestInstallSchedule_Darwin_BinaryPathChange_UpdatesPlist for the crontab
+// mechanism: a changed BinaryPath must land in the live crontab entry on a
+// re-register, replacing the stale one rather than leaving it in place.
+func TestInstallSchedule_Cron_BinaryPathChange_UpdatesEntry(t *testing.T) {
+	dir := t.TempDir()
+	crontabPath := filepath.Join(dir, "crontab.txt")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeCrontabBinary(t, crontabPath, capturePath)
+	deps := cronDeps(t, bin)
+
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("first InstallSchedule() error = %v, want nil", err)
+	}
+
+	deps.BinaryPath = "/Users/example/go/bin/token-profile"
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("second InstallSchedule() error = %v, want nil", err)
+	}
+
+	got, err := os.ReadFile(crontabPath)
+	if err != nil {
+		t.Fatalf("ReadFile(crontab.txt) error = %v", err)
+	}
+	if n := strings.Count(string(got), cronMarker(deps.Label)); n != 1 {
+		t.Errorf("crontab = %q, want exactly one managed entry after reconcile, got %d", got, n)
+	}
+	if !strings.Contains(string(got), "/Users/example/go/bin/token-profile") {
+		t.Errorf("crontab = %q, want it to reflect the updated BinaryPath", got)
+	}
+	if strings.Contains(string(got), "/usr/local/bin/token-profile") {
+		t.Errorf("crontab = %q, want the stale BinaryPath gone", got)
+	}
+}
+
+// TestInstallSchedule_Cron_PathEnv_WrittenAsLine mirrors
+// TestInstallSchedule_Darwin_PathEnv_WrittenToPlist for the crontab
+// mechanism: a configured PathEnv must land as a PATH= line scoped ahead of
+// the managed job line (appendCronEntry always appends at the very end, so
+// it never affects any pre-existing entry above it).
+func TestInstallSchedule_Cron_PathEnv_WrittenAsLine(t *testing.T) {
+	dir := t.TempDir()
+	crontabPath := filepath.Join(dir, "crontab.txt")
+	capturePath := filepath.Join(dir, "capture")
+	bin := fakeCrontabBinary(t, crontabPath, capturePath)
+	deps := cronDeps(t, bin)
+	deps.PathEnv = "/opt/homebrew/bin:/usr/bin:/bin"
+
+	if _, err := InstallSchedule(t.Context(), deps); err != nil {
+		t.Fatalf("InstallSchedule() error = %v, want nil", err)
+	}
+
+	got, err := os.ReadFile(crontabPath)
+	if err != nil {
+		t.Fatalf("ReadFile(crontab.txt) error = %v", err)
+	}
+	if !strings.Contains(string(got), "PATH=/opt/homebrew/bin:/usr/bin:/bin\n") {
+		t.Errorf("crontab = %q, want a PATH= line for the configured PathEnv", got)
 	}
 }
 

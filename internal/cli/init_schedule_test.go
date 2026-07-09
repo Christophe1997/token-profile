@@ -65,6 +65,56 @@ func TestInit_ScheduleRegistrationAccepted_InstallsSchedule(t *testing.T) {
 	}
 }
 
+// TestInit_ScheduleRegistrationAccepted_PathEnvPropagatedToPlist covers
+// InitDeps.PathEnv flowing all the way through offerScheduleRegistration
+// into the live-installed plist, not just the reviewable snippet.
+func TestInit_ScheduleRegistrationAccepted_PathEnvPropagatedToPlist(t *testing.T) {
+	remote := initBareRemote(t)
+	seedRemote(t, remote, unmarkedReadme)
+	work := cloneWorkdir(t, remote, "sched-pathenv")
+	bin := fakeAgentsviewBinary(t, "claude-code", "claude-sonnet-5", "2026-06-20", 1000, 1.5)
+	scheduleDest := filepath.Join(t.TempDir(), "schedule")
+
+	schedDir := t.TempDir()
+	statePath := filepath.Join(schedDir, "state")
+	capturePath := filepath.Join(schedDir, "capture")
+	launchctlBin := fakeLaunchctlBinary(t, statePath, capturePath)
+	plistPath := filepath.Join(schedDir, "schedule.plist")
+
+	var stdout bytes.Buffer
+	deps := InitDeps{
+		Config:         config.Config{Breakdown: config.BreakdownPerModel, TargetRepo: work},
+		Client:         &agentsview.Client{BinaryName: bin},
+		MachineID:      "machine-sched-pathenv",
+		Now:            time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC),
+		RepoDir:        work,
+		ScheduleDest:   scheduleDest,
+		BinaryPath:     "/usr/local/bin/token-profile",
+		ConfigPath:     "/config.json",
+		PathEnv:        "/opt/homebrew/bin:/usr/bin:/bin",
+		Stdout:         &stdout,
+		Stdin:          strings.NewReader("y\n"),
+		PromptSchedule: true,
+		Schedule: ScheduleDeps{
+			GOOS:      "darwin",
+			PlistPath: plistPath,
+			Launchctl: launchctlBin,
+		},
+	}
+
+	if err := Init(t.Context(), deps); err != nil {
+		t.Fatalf("Init() error = %v, want nil", err)
+	}
+
+	plist, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("ReadFile(plist) error = %v", err)
+	}
+	if !strings.Contains(string(plist), "/opt/homebrew/bin:/usr/bin:/bin") {
+		t.Errorf("installed plist = %q, want the configured PathEnv propagated from InitDeps", plist)
+	}
+}
+
 // TestInit_ScheduleRegistrationAccepted_InstallFails_ReportsWarningExitsZero
 // covers KTD17: a failed live install attempt (e.g. a permission-restricted
 // LaunchAgents directory, simulated here by a launchctl fixture that always

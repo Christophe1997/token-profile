@@ -61,6 +61,15 @@ type ScheduleDeps struct {
 	// here — this package never re-validates it. Only read by
 	// InstallSchedule.
 	Interval time.Duration
+	// PathEnv, when non-empty, is written into the scheduled entry's own
+	// environment (launchd's EnvironmentVariables PATH, cron's PATH= line)
+	// — both mechanisms otherwise give a scheduled job a minimal PATH (e.g.
+	// launchd's default is just /usr/bin:/bin:/usr/sbin:/sbin), which
+	// doesn't include common install locations like /opt/homebrew/bin,
+	// breaking PATH-dependent lookups (agentsview) the interactive session
+	// that ran `init` already resolved fine. Empty leaves the scheduler's
+	// own default environment in effect. Only read by InstallSchedule.
+	PathEnv string
 	// PlistPath is where InstallSchedule writes the launchd job's plist
 	// before bootstrapping it (darwin only).
 	PlistPath string
@@ -159,21 +168,21 @@ func CheckScheduleState(ctx context.Context, deps ScheduleDeps) (ScheduleState, 
 	return state, err
 }
 
-// InstallSchedule idempotently registers the scheduled run: a state check
-// runs first, so an already-registered job is a no-op that still reports
-// success (KTD13) rather than failing on launchctl bootstrap's "already
-// loaded" error. A failed state check is propagated rather than risking a
-// blind install against unknown live state.
+// InstallSchedule idempotently reconciles the scheduled run to deps' current
+// BinaryPath/ConfigPath/Interval/PathEnv: an already-registered job is
+// reloaded (bootout then bootstrap on darwin, replaced in place on cron)
+// rather than left as a silent no-op (KTD13 superseded — a blind no-op let a
+// stale live job keep spawning a since-deleted binary for over a day after
+// its plist file was correctly updated but never reloaded). A failed state
+// check is propagated rather than risking a blind install against unknown
+// live state.
 func InstallSchedule(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
 	state, content, err := checkScheduleState(ctx, deps)
 	if err != nil {
 		return state, err
 	}
-	if state == ScheduleRegistered {
-		return state, nil
-	}
 	if deps.goos() == "darwin" {
-		return installLaunchd(ctx, deps)
+		return installLaunchd(ctx, deps, state == ScheduleRegistered)
 	}
 	return installCron(ctx, deps, content)
 }
@@ -238,11 +247,16 @@ func checkLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, error)
 }
 
 // launchdPlist renders the job's plist body: Label, ProgramArguments
-// (BinaryPath, "run", "--config", ConfigPath), and StartInterval in raw
-// seconds — mirroring init.go's schedulingEntryContent darwin branch,
-// which a later unit rewires to call scheduleIntervalSeconds/
-// scheduleCronField instead of its current hardcoded 21600/"0 */6 * * *".
+// (BinaryPath, "run", "--config", ConfigPath), StartInterval in raw
+// seconds, and (when PathEnv is set) an EnvironmentVariables PATH override —
+// mirroring init.go's schedulingEntryContent darwin branch, which a later
+// unit rewires to call scheduleIntervalSeconds/scheduleCronField instead of
+// its current hardcoded 21600/"0 */6 * * *".
 func launchdPlist(deps ScheduleDeps) string {
+	var env string
+	if deps.PathEnv != "" {
+		env = fmt.Sprintf("\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>%s</string>\n\t</dict>\n", deps.PathEnv)
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -258,12 +272,17 @@ func launchdPlist(deps ScheduleDeps) string {
 	</array>
 	<key>StartInterval</key>
 	<integer>%d</integer>
-</dict>
+%s</dict>
 </plist>
-`, deps.Label, deps.BinaryPath, deps.ConfigPath, scheduleIntervalSeconds(deps.Interval))
+`, deps.Label, deps.BinaryPath, deps.ConfigPath, scheduleIntervalSeconds(deps.Interval), env)
 }
 
-func installLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, error) {
+// installLaunchd writes the current plist and (re)bootstraps it. When
+// alreadyRegistered, it boots the stale job out first — real launchd's
+// bootstrap fails against a label that's already loaded, so reconciling a
+// live job's ProgramArguments/PATH after they've drifted from what's on
+// disk requires a full reload, not a second bootstrap on top of the first.
+func installLaunchd(ctx context.Context, deps ScheduleDeps, alreadyRegistered bool) (ScheduleState, error) {
 	if err := os.MkdirAll(filepath.Dir(deps.PlistPath), 0o755); err != nil {
 		return ScheduleNotRegistered, fmt.Errorf("creating plist directory for %s: %w", deps.PlistPath, err)
 	}
@@ -276,6 +295,18 @@ func installLaunchd(ctx context.Context, deps ScheduleDeps) (ScheduleState, erro
 		return ScheduleNotRegistered, err
 	}
 	domain := launchctlDomain()
+
+	if alreadyRegistered {
+		target := launchctlServiceTarget(deps.Label)
+		bootout := exec.CommandContext(ctx, bin, "bootout", target)
+		var bootoutOut bytes.Buffer
+		bootout.Stdout = &bootoutOut
+		bootout.Stderr = &bootoutOut
+		if err := bootout.Run(); err != nil {
+			return ScheduleRegistered, fmt.Errorf("launchctl bootout %s (reloading a stale registration): %w: %s", target, err, strings.TrimSpace(bootoutOut.String()))
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, bin, "bootstrap", domain, deps.PlistPath)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -385,28 +416,41 @@ func cronJobLine(interval time.Duration, binaryPath, configPath string) string {
 	return fmt.Sprintf("0 %s * * * %s run --config %s", scheduleCronField(interval), binaryPath, configPath)
 }
 
-// appendCronEntry appends the managed marker-plus-job-line pair to
-// existing, preserving every pre-existing entry untouched and normalizing
-// to exactly one trailing newline regardless of existing's own trailing
-// newline count.
+// appendCronEntry appends the managed marker-plus-job-line pair (plus an
+// optional PATH= line when deps.PathEnv is set) to existing, preserving
+// every pre-existing entry untouched and normalizing to exactly one
+// trailing newline regardless of existing's own trailing newline count. The
+// PATH= line is always appended last in the file, so — cron applies
+// variable assignments to every job line that follows them — it only ever
+// scopes to this entry, never retroactively affecting an earlier one.
 func appendCronEntry(existing string, deps ScheduleDeps) string {
-	entry := cronMarker(deps.Label) + "\n" + cronJobLine(deps.Interval, deps.BinaryPath, deps.ConfigPath)
+	entry := cronMarker(deps.Label) + "\n"
+	if deps.PathEnv != "" {
+		entry += "PATH=" + deps.PathEnv + "\n"
+	}
+	entry += cronJobLine(deps.Interval, deps.BinaryPath, deps.ConfigPath)
 	if existing == "" {
 		return entry + "\n"
 	}
 	return strings.TrimRight(existing, "\n") + "\n" + entry + "\n"
 }
 
-// stripCronEntry removes the managed marker line and the job line
-// immediately following it, leaving every other entry in existing
-// untouched — the inverse of appendCronEntry.
+// stripCronEntry removes the managed marker line, its optional following
+// PATH= line, and the job line after that, leaving every other entry in
+// existing untouched — the inverse of appendCronEntry. Tolerating a missing
+// PATH= line keeps this compatible with an entry installed before PathEnv
+// support existed (marker directly followed by the job line).
 func stripCronEntry(existing, label string) string {
 	marker := cronMarker(label)
 	lines := strings.Split(existing, "\n")
 	kept := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		if lines[i] == marker {
-			i++ // also drop the job line this marker precedes
+			i++ // advance to the line after the marker
+			if i < len(lines) && strings.HasPrefix(lines[i], "PATH=") {
+				i++ // also skip an optional PATH= line
+			}
+			// i now indexes the job line; the loop's own i++ drops it too.
 			continue
 		}
 		kept = append(kept, lines[i])
@@ -415,9 +459,15 @@ func stripCronEntry(existing, label string) string {
 }
 
 // installCron takes existing (the crontab content the caller already
-// fetched via checkCronState) rather than re-fetching it.
+// fetched via checkCronState) rather than re-fetching it. It strips any
+// prior managed entry before appending the current one — reconciling in
+// place, mirroring installLaunchd's reload, rather than a blind append that
+// would either duplicate the entry or (if gated behind "already
+// registered") silently leave a drifted BinaryPath/ConfigPath/PathEnv in
+// place.
 func installCron(ctx context.Context, deps ScheduleDeps, existing string) (ScheduleState, error) {
-	if err := writeCrontab(ctx, deps, appendCronEntry(existing, deps)); err != nil {
+	reconciled := appendCronEntry(stripCronEntry(existing, deps.Label), deps)
+	if err := writeCrontab(ctx, deps, reconciled); err != nil {
 		return ScheduleNotRegistered, err
 	}
 	return ScheduleRegistered, nil

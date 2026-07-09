@@ -65,6 +65,12 @@ type InitDeps struct {
 	// ConfigPath is the --config value the scheduling entry passes to
 	// `token-profile run`.
 	ConfigPath string
+	// PathEnv, when non-empty, is propagated into both the reviewable
+	// scheduling-entry snippet and the live-installed schedule (see
+	// ScheduleDeps.PathEnv) — normally the PATH `init` itself ran with,
+	// since that's the environment that already proved PATH-dependent
+	// lookups (agentsview) resolve.
+	PathEnv string
 	// Stdout receives the same post-publish confirmation as RunDeps.Stdout
 	// — propagated into the RunDeps Init builds internally below, so init
 	// gets this output through the same shared run() core, no separate
@@ -182,7 +188,7 @@ func initLocked(ctx context.Context, deps InitDeps, interval time.Duration) (dry
 		return false, fmt.Errorf("scaffolding README markers: %w", err)
 	}
 
-	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath, interval); err != nil {
+	if err := ensureSchedulingEntry(deps.ScheduleDest, runtime.GOOS, deps.BinaryPath, deps.ConfigPath, deps.PathEnv, interval); err != nil {
 		return false, fmt.Errorf("scaffolding scheduling entry: %w", err)
 	}
 	if deps.Stdout != nil {
@@ -228,6 +234,7 @@ func offerScheduleRegistration(ctx context.Context, deps InitDeps, interval time
 	sched.BinaryPath = deps.BinaryPath
 	sched.ConfigPath = deps.ConfigPath
 	sched.Interval = interval
+	sched.PathEnv = deps.PathEnv
 
 	if err := refuseIfPrivileged(); err != nil {
 		fmt.Fprintf(deps.Stdout,
@@ -282,11 +289,11 @@ func ensureReadmeMarkers(repoDir string) error {
 // dest, describing how to run `token-profile run` on a recurring schedule.
 // It overwrites dest deterministically on every call — rather than
 // appending — so re-running init never duplicates the entry.
-func ensureSchedulingEntry(dest, goos, binaryPath, configPath string, interval time.Duration) error {
+func ensureSchedulingEntry(dest, goos, binaryPath, configPath, pathEnv string, interval time.Duration) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("creating scheduling entry directory for %s: %w", dest, err)
 	}
-	content := schedulingEntryContent(goos, binaryPath, configPath, interval)
+	content := schedulingEntryContent(goos, binaryPath, configPath, pathEnv, interval)
 	if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("writing scheduling entry %s: %w", dest, err)
 	}
@@ -299,14 +306,15 @@ func ensureSchedulingEntry(dest, goos, binaryPath, configPath string, interval t
 // 6-hour cycle (KTD10 supersedes the previous 21600/"0 */6 * * *"
 // constants). The darwin branch delegates to schedule.go's own launchdPlist
 // so the live-install path (offerScheduleRegistration) and this reviewable
-// snippet render from one template and can never drift apart. A zero
-// interval — an InitDeps literal built directly by a test, bypassing
+// snippet render from one template and can never drift apart — pathEnv
+// flows through the same way, landing in the plist's EnvironmentVariables.
+// A zero interval — an InitDeps literal built directly by a test, bypassing
 // config.Load's Default() layering — falls back to
 // config.DefaultScheduleInterval, mirroring resolveRenderMode's own
 // zero-value-safe default (run.go). Taking goos as a parameter (rather than
 // reading runtime.GOOS internally) keeps this function pure and testable
 // across both branches regardless of which OS the tests run on.
-func schedulingEntryContent(goos, binaryPath, configPath string, interval time.Duration) string {
+func schedulingEntryContent(goos, binaryPath, configPath, pathEnv string, interval time.Duration) string {
 	interval = cmp.Or(interval, config.DefaultScheduleInterval)
 
 	if goos == "darwin" {
@@ -315,12 +323,17 @@ func schedulingEntryContent(goos, binaryPath, configPath string, interval time.D
 			BinaryPath: binaryPath,
 			ConfigPath: configPath,
 			Interval:   interval,
+			PathEnv:    pathEnv,
 		})
 	}
 
+	var pathLine string
+	if pathEnv != "" {
+		pathLine = "PATH=" + pathEnv + "\n"
+	}
 	return fmt.Sprintf(
-		"# token-profile: refresh usage profile every %d hours\n%s\n",
-		int(interval.Hours()), cronJobLine(interval, binaryPath, configPath),
+		"# token-profile: refresh usage profile every %d hours\n%s%s\n",
+		int(interval.Hours()), pathLine, cronJobLine(interval, binaryPath, configPath),
 	)
 }
 
@@ -597,6 +610,7 @@ func NewInitCmd() *cobra.Command {
 				ScheduleDest:     scheduleDest,
 				BinaryPath:       binaryPath,
 				ConfigPath:       configPath,
+				PathEnv:          os.Getenv("PATH"),
 				Stdout:           cmd.OutOrStdout(),
 				Stdin:            os.Stdin,
 				PromptSchedule:   interactive,

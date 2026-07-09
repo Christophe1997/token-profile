@@ -329,7 +329,7 @@ func TestInit_ScaffoldingFailure_RecordsFailureToHistory(t *testing.T) {
 // scheduling snippet must reflect the configured ScheduleInterval instead
 // of the old hardcoded 6-hour cycle (KTD10 supersedes 21600/"0 */6 * * *").
 func TestSchedulingEntryContent_Darwin_UsesConfiguredInterval(t *testing.T) {
-	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", 4*time.Hour)
+	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", "", 4*time.Hour)
 	if !strings.Contains(got, "<integer>14400</integer>") {
 		t.Errorf("schedulingEntryContent() = %q, want StartInterval 14400 for a 4h interval", got)
 	}
@@ -339,7 +339,7 @@ func TestSchedulingEntryContent_Darwin_UsesConfiguredInterval(t *testing.T) {
 }
 
 func TestSchedulingEntryContent_Cron_UsesConfiguredInterval(t *testing.T) {
-	got := schedulingEntryContent("linux", "/usr/local/bin/token-profile", "/config.json", 4*time.Hour)
+	got := schedulingEntryContent("linux", "/usr/local/bin/token-profile", "/config.json", "", 4*time.Hour)
 	if !strings.Contains(got, "0 */4 * * *") {
 		t.Errorf("schedulingEntryContent() = %q, want cron field */4 for a 4h interval", got)
 	}
@@ -353,10 +353,28 @@ func TestSchedulingEntryContent_Cron_UsesConfiguredInterval(t *testing.T) {
 // Default() layering: a zero interval must still render a sane cadence
 // rather than a nonsensical StartInterval 0 / "*/0" cron field.
 func TestSchedulingEntryContent_ZeroInterval_DefaultsToConfigDefault(t *testing.T) {
-	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", 0)
+	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", "", 0)
 	want := fmt.Sprintf("<integer>%d</integer>", scheduleIntervalSeconds(config.DefaultScheduleInterval))
 	if !strings.Contains(got, want) {
 		t.Errorf("schedulingEntryContent(interval=0) = %q, want it to default to %q", got, want)
+	}
+}
+
+// TestSchedulingEntryContent_Darwin_IncludesPathEnv and
+// TestSchedulingEntryContent_Cron_IncludesPathEnvLine cover PathEnv
+// propagating into the reviewable snippet, matching what a live install
+// would actually apply (see ScheduleDeps.PathEnv).
+func TestSchedulingEntryContent_Darwin_IncludesPathEnv(t *testing.T) {
+	got := schedulingEntryContent("darwin", "/usr/local/bin/token-profile", "/config.json", "/opt/homebrew/bin:/usr/bin:/bin", time.Hour)
+	if !strings.Contains(got, "/opt/homebrew/bin:/usr/bin:/bin") {
+		t.Errorf("schedulingEntryContent() = %q, want the configured PathEnv reflected", got)
+	}
+}
+
+func TestSchedulingEntryContent_Cron_IncludesPathEnvLine(t *testing.T) {
+	got := schedulingEntryContent("linux", "/usr/local/bin/token-profile", "/config.json", "/opt/homebrew/bin:/usr/bin:/bin", time.Hour)
+	if !strings.Contains(got, "PATH=/opt/homebrew/bin:/usr/bin:/bin\n") {
+		t.Errorf("schedulingEntryContent() = %q, want a PATH= line for the configured PathEnv", got)
 	}
 }
 
