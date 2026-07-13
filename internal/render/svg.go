@@ -238,14 +238,14 @@ func AltText(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary) st
 	if !hasHistory {
 		return CardTitle + " — " + noDataMessage
 	}
-	return fmt.Sprintf("%s. %s. %s.", titleLine(ds), summaryLine(sum), streakLine(sum))
+	return fmt.Sprintf("%s. %s. %s.", titleLine(sum), summaryLine(sum), streakLine(sum))
 }
 
 func buildSVGCardData(ds snapshot.MergedDataset, hasHistory bool, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) svgCardData {
 	data := svgCardData{
 		Width:       svgWidth,
 		Height:      svgHeight,
-		Title:       titleLine(ds),
+		Title:       titleLine(sum),
 		LastUpdated: lastUpdatedLine(renderedAt),
 	}
 

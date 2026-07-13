@@ -26,6 +26,15 @@ type Summary struct {
 	AsOf           time.Time
 	TokenChangePct *float64
 	CostChangePct  *float64
+	// WindowDays is the inclusive calendar-day count the card's title
+	// states as its "last N days" (window's own length, e.g. 30), capped by
+	// how far back ds's full history actually reaches so a brand-new
+	// adopter isn't credited with a window they haven't lived through yet.
+	// Deliberately not derived from the span between ds's individual rows:
+	// a mid-window gap in usage (time off, a machine offline) must not
+	// shrink the reported window, only the totals it computes to zero for
+	// those days. Zero when ds has no rows at all.
+	WindowDays int
 }
 
 // Compute derives Summary from ds. asOf stands in for "today" (UTC) when
@@ -46,10 +55,15 @@ func Compute(ds snapshot.MergedDataset, asOf time.Time, window time.Duration) Su
 	var currentTokens, previousTokens int64
 	var currentCost, previousCost float64
 	active := make(map[time.Time]bool, len(ds.Rows))
+	var earliest time.Time
+	hasRows := false
 	for _, r := range ds.Rows {
 		d, err := time.Parse(time.DateOnly, r.Date)
 		if err != nil {
 			continue
+		}
+		if !hasRows || d.Before(earliest) {
+			earliest, hasRows = d, true
 		}
 		if !(r.Tokens == 0 && r.Cost == 0) {
 			active[d] = true // zero-usage rows don't mark a day active (matches Resolve's own omission convention)
@@ -71,7 +85,19 @@ func Compute(ds snapshot.MergedDataset, asOf time.Time, window time.Duration) Su
 		AsOf:           asOf,
 		TokenChangePct: changePct(previousTokens, currentTokens),
 		CostChangePct:  changePct(previousCost, currentCost),
+		WindowDays:     windowDays(earliest, hasRows, civilDate(asOf), window),
 	}
+}
+
+// windowDays caps the configured window (in days) by how long ds has had
+// any recorded history at all, per Summary.WindowDays's own doc. Returns 0
+// when there are no rows to date a "since" from.
+func windowDays(earliest time.Time, hasRows bool, today time.Time, window time.Duration) int {
+	if !hasRows {
+		return 0
+	}
+	historyDays := int(today.Sub(earliest).Hours()/24) + 1
+	return min(historyDays, int(window.Hours()/24))
 }
 
 // changePct returns the percentage change from previous to current, or nil

@@ -82,10 +82,13 @@ func TestRender_TitleIsFirstContentLine(t *testing.T) {
 }
 
 // TestRender_TitleIncludesStatDuration covers the title's stat-duration
-// suffix: the inclusive calendar span between the dataset's earliest and
-// latest recorded day, e.g. three distinct days (06-20 through 06-22) reads
-// "last 3 days", and a single day is singular ("last 1 day"). An empty
-// dataset has no span to report, so the title omits the suffix entirely.
+// suffix, sum.WindowDays: the configured window capped by how far back the
+// dataset's history actually reaches, e.g. three distinct days of history
+// (06-20 through 06-22) under a 30-day window reads "last 3 days" (capped by
+// history age), and a single day is singular ("last 1 day"). A mid-window
+// gap in an otherwise long history must not shorten the reported window. An
+// empty dataset has no history at all, so the title omits the suffix
+// entirely.
 func TestRender_TitleIncludesStatDuration(t *testing.T) {
 	tests := []struct {
 		name string
@@ -93,16 +96,24 @@ func TestRender_TitleIncludesStatDuration(t *testing.T) {
 		want string
 	}{
 		{
-			name: "multi-day span",
+			name: "history shorter than window is capped by history age",
 			ds:   fixtureDataset(),
 			want: "Token Profile — last 3 days",
 		},
 		{
 			name: "single day is singular",
 			ds: snapshot.MergedDataset{Rows: []snapshot.Row{
-				{Date: "2026-07-01", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+				{Date: "2026-06-22", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
 			}},
 			want: "Token Profile — last 1 day",
+		},
+		{
+			name: "mid-window gap does not shorten the window",
+			ds: snapshot.MergedDataset{Rows: []snapshot.Row{
+				{Date: "2026-05-09", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+				{Date: "2026-06-22", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+			}},
+			want: "Token Profile — last 30 days",
 		},
 		{
 			name: "empty dataset omits duration",

@@ -33,7 +33,7 @@ func TestCompute_SingleDayFirstRun(t *testing.T) {
 
 	got := summary.Compute(ds, asOf, 30*24*time.Hour)
 
-	want := summary.Summary{TotalTokens: 100, TotalCost: 1.0, Streak: 1, AsOf: asOf}
+	want := summary.Summary{TotalTokens: 100, TotalCost: 1.0, Streak: 1, AsOf: asOf, WindowDays: 1}
 	if got != want {
 		t.Errorf("Compute() = %+v, want %+v", got, want)
 	}
@@ -197,6 +197,50 @@ func TestCompute_CurrentWindow_ExcludesCutoffDay(t *testing.T) {
 	}
 	if got.TokenChangePct == nil || *got.TokenChangePct != -80 {
 		t.Errorf("Compute().TokenChangePct = %v, want -80 (20 vs previous 100 = -80%%)", got.TokenChangePct)
+	}
+}
+
+// TestCompute_WindowDays_NotShortenedByMidWindowGap covers the bug this
+// guards against: a user with real history reaching back well past the
+// window takes time off partway through it (no rows for several days right
+// after the window's cutoff), then resumes. WindowDays must still report
+// the full configured window (30), not the shorter span between the first
+// row *after* the gap and asOf (22) — the gap doesn't mean the window is
+// smaller, only that some of it was inactive.
+func TestCompute_WindowDays_NotShortenedByMidWindowGap(t *testing.T) {
+	asOf := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	window := 30 * 24 * time.Hour
+	var rows []snapshot.Row
+	// history well before the window, establishing this isn't a new adopter
+	rows = append(rows, snapshot.Row{Date: "2026-05-09", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0})
+	// a 9-day gap immediately after the window's cutoff (2026-06-13, exclusive)
+	rows = append(rows, snapshot.Row{Date: "2026-06-22", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0})
+	rows = append(rows, snapshot.Row{Date: "2026-07-13", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0})
+	ds := snapshot.MergedDataset{Rows: rows}
+
+	got := summary.Compute(ds, asOf, window)
+
+	if got.WindowDays != 30 {
+		t.Errorf("Compute().WindowDays = %d, want 30 (the configured window, unshortened by the mid-window gap)", got.WindowDays)
+	}
+}
+
+// TestCompute_WindowDays_CappedByHistoryAge covers a brand-new adopter: with
+// only a few days of history ever recorded, WindowDays must report that
+// actual history age rather than claiming the full configured window —
+// otherwise a first-run card would misleadingly say "last 30 days" for
+// someone who has used the tool for one day.
+func TestCompute_WindowDays_CappedByHistoryAge(t *testing.T) {
+	asOf := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
+	ds := snapshot.MergedDataset{Rows: []snapshot.Row{
+		{Date: "2026-06-02", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+		{Date: "2026-06-04", Agent: "claude-code", Model: "claude-sonnet-5", Tokens: 100, Cost: 1.0},
+	}}
+
+	got := summary.Compute(ds, asOf, 30*24*time.Hour)
+
+	if got.WindowDays != 3 {
+		t.Errorf("Compute().WindowDays = %d, want 3 (history only reaches back to 2026-06-02, capping the 30-day window)", got.WindowDays)
 	}
 }
 

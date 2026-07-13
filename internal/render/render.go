@@ -37,33 +37,18 @@ const CardTitle = "Token Profile"
 // produced it.
 const repoURL = "https://github.com/Christophe1997/token-profile"
 
-// titleLine renders the card's heading, appending the stat duration — the
-// inclusive calendar span between ds's earliest and latest recorded day
-// (e.g. "last 30 days") — so the card states what window its numbers cover.
-// An empty dataset has no span to report, so the suffix is omitted.
-func titleLine(ds snapshot.MergedDataset) string {
-	dates, _ := dailyTokenTotals(ds.Rows)
-	if len(dates) == 0 {
+// titleLine renders the card's heading, appending the stat duration —
+// sum.WindowDays (e.g. "last 30 days") — so the card states what window its
+// numbers cover. Zero (no history at all yet) omits the suffix.
+func titleLine(sum summary.Summary) string {
+	if sum.WindowDays == 0 {
 		return CardTitle
 	}
-	days := statDurationDays(dates[0], dates[len(dates)-1])
 	unit := "days"
-	if days == 1 {
+	if sum.WindowDays == 1 {
 		unit = "day"
 	}
-	return fmt.Sprintf("%s — last %d %s", CardTitle, days, unit)
-}
-
-// statDurationDays returns the inclusive number of calendar days spanned by
-// [first, last] (both canonical "YYYY-MM-DD" dates, per snapshot.Row.Date) —
-// e.g. a single day spans 1, back-to-back days span 2.
-func statDurationDays(first, last string) int {
-	f, err1 := time.Parse(time.DateOnly, first)
-	l, err2 := time.Parse(time.DateOnly, last)
-	if err1 != nil || err2 != nil {
-		return 0
-	}
-	return int(l.Sub(f).Hours()/24) + 1
+	return fmt.Sprintf("%s — last %d %s", CardTitle, sum.WindowDays, unit)
 }
 
 // Render composes ds, sum, and mode into the dashboard card. breakdownLimit
@@ -74,7 +59,7 @@ func statDurationDays(first, last string) int {
 // than time.Now() so callers stay deterministic and testable.
 func Render(ds snapshot.MergedDataset, sum summary.Summary, mode config.BreakdownMode, breakdownLimit int, renderedAt time.Time) string {
 	var lines []string
-	lines = append(lines, titleLine(ds))
+	lines = append(lines, titleLine(sum))
 	lines = append(lines, "")
 	lines = append(lines, summaryLine(sum))
 	lines = append(lines, "")
