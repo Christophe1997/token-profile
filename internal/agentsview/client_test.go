@@ -96,6 +96,90 @@ func TestParseUsageDaily_RealClaudeFixture(t *testing.T) {
 	}
 }
 
+// realDailyClaudeMicrodollarsFixturePath is a real `agentsview usage daily
+// --json --breakdown --offline --timezone UTC --agent claude` response,
+// captured from the actual agentsview v0.42.0 binary and trimmed of
+// project/agent/machine breakdowns (see internal/agentsview/testdata).
+// agentsview v0.40.0 ("Unify usage metrics and store costs as precise
+// microdollar values") changed every cost field from a bare float64 dollar
+// amount to a `{"microdollars": N}` object; this fixture is ground truth for
+// that new shape.
+const realDailyClaudeMicrodollarsFixturePath = "testdata/real_usage_daily_claude_microdollars.json"
+
+func TestParseUsageDaily_RealClaudeMicrodollarsFixture(t *testing.T) {
+	data, err := os.ReadFile(realDailyClaudeMicrodollarsFixturePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	got, err := parseUsageDaily(data, "claude")
+	if err != nil {
+		t.Fatalf("parseUsageDaily() error = %v, want nil", err)
+	}
+
+	if len(got.Daily) != 1 {
+		t.Fatalf("len(Daily) = %d, want 1", len(got.Daily))
+	}
+
+	// Fixture's modelBreakdowns[0].cost = {"microdollars": 936506} => $0.936506.
+	const wantCost = 0.936506
+	if math.Abs(got.Daily[0].Cost-wantCost) > 1e-9 {
+		t.Errorf("Daily[0].Cost = %v, want %v (936506 microdollars)", got.Daily[0].Cost, wantCost)
+	}
+
+	// Fixture's totals.totalCost = {"microdollars": 936506} => $0.936506.
+	if math.Abs(got.Totals.Cost-wantCost) > 1e-9 {
+		t.Errorf("Totals.Cost = %v, want %v (936506 microdollars)", got.Totals.Cost, wantCost)
+	}
+}
+
+// TestParseUsageDaily_MicrodollarCostObject covers the same schema with a
+// minimal inline fixture, pinning the exact microdollars->dollars
+// conversion (1,230,000 microdollars => $1.23) independent of the real
+// fixture's specific numbers.
+func TestParseUsageDaily_MicrodollarCostObject(t *testing.T) {
+	const fixture = `{
+		"daily": [
+			{
+				"date": "2026-09-01",
+				"modelBreakdowns": [
+					{"modelName": "claude-sonnet-5", "inputTokens": 100, "outputTokens": 200, "cost": {"microdollars": 1230000}}
+				]
+			}
+		],
+		"totals": {"inputTokens": 100, "outputTokens": 200, "totalCost": {"microdollars": 1230000}}
+	}`
+
+	got, err := parseUsageDaily([]byte(fixture), "claude")
+	if err != nil {
+		t.Fatalf("parseUsageDaily() error = %v, want nil", err)
+	}
+
+	const wantCost = 1.23
+	if got.Daily[0].Cost != wantCost {
+		t.Errorf("Daily[0].Cost = %v, want %v", got.Daily[0].Cost, wantCost)
+	}
+	if got.Totals.Cost != wantCost {
+		t.Errorf("Totals.Cost = %v, want %v", got.Totals.Cost, wantCost)
+	}
+}
+
+// TestParseUsageDaily_MalformedMoneyCostObject_ReturnsError covers a money
+// object that doesn't carry the expected "microdollars" key: this must
+// error loudly rather than silently decode as a $0 cost, which would
+// otherwise render as valid-looking ($0.00) data.
+func TestParseUsageDaily_MalformedMoneyCostObject_ReturnsError(t *testing.T) {
+	const fixture = `{
+		"daily": [],
+		"totals": {"inputTokens": 0, "outputTokens": 0, "totalCost": {"dollars": 1.23}}
+	}`
+
+	_, err := parseUsageDaily([]byte(fixture), "claude")
+	if err == nil {
+		t.Fatal("parseUsageDaily() error = nil, want an error for a cost object missing \"microdollars\"")
+	}
+}
+
 func TestParseUsageDaily_FlattensModelBreakdownsPerDay(t *testing.T) {
 	const fixture = `{
 		"daily": [

@@ -218,7 +218,9 @@ func fetchSessionListPage(ctx context.Context, path, cursor string) (*sessionLis
 
 // rawUsageDaily is the literal decode shape of `agentsview usage daily
 // --json --breakdown`'s real response (verified against captured fixtures,
-// see internal/agentsview/testdata/real_usage_daily_claude.json). Only the
+// see internal/agentsview/testdata/real_usage_daily_claude.json and
+// real_usage_daily_claude_microdollars.json — the latter for agentsview
+// v0.40.0+'s money-object cost fields, decoded via apiCost). Only the
 // fields parseUsageDaily's flattening needs are declared; per agentsview's
 // own additive-schema guidance, every other field (projectBreakdowns,
 // agentBreakdowns, modelsUsed, sessionCounts, cacheSavings, etc.) is
@@ -243,7 +245,7 @@ type rawBreakdown struct {
 	OutputTokens        int64   `json:"outputTokens"`
 	CacheCreationTokens int64   `json:"cacheCreationTokens"`
 	CacheReadTokens     int64   `json:"cacheReadTokens"`
-	Cost                float64 `json:"cost"`
+	Cost                apiCost `json:"cost"`
 }
 
 // rawTotals is the real top-level `totals` object.
@@ -252,7 +254,39 @@ type rawTotals struct {
 	OutputTokens        int64   `json:"outputTokens"`
 	CacheCreationTokens int64   `json:"cacheCreationTokens"`
 	CacheReadTokens     int64   `json:"cacheReadTokens"`
-	TotalCost           float64 `json:"totalCost"`
+	TotalCost           apiCost `json:"totalCost"`
+}
+
+// apiCost decodes a cost value in dollars from either shape agentsview has
+// used for it: a bare float64 (agentsview < v0.40.0) or a money object,
+// `{"microdollars": N}` (agentsview >= v0.40.0, see
+// https://github.com/kenn-io/agentsview/releases/tag/v0.40.0 — "store costs
+// as precise microdollar values"). A money object missing "microdollars"
+// errors instead of silently decoding as $0, since that would otherwise
+// render as valid-looking zero-cost data.
+type apiCost float64
+
+func (c *apiCost) UnmarshalJSON(data []byte) error {
+	if len(bytes.TrimSpace(data)) > 0 && data[0] == '{' {
+		var money struct {
+			Microdollars *int64 `json:"microdollars"`
+		}
+		if err := json.Unmarshal(data, &money); err != nil {
+			return err
+		}
+		if money.Microdollars == nil {
+			return fmt.Errorf("cost object missing \"microdollars\": %s", data)
+		}
+		*c = apiCost(float64(*money.Microdollars) / 1_000_000)
+		return nil
+	}
+
+	var dollars float64
+	if err := json.Unmarshal(data, &dollars); err != nil {
+		return err
+	}
+	*c = apiCost(dollars)
+	return nil
 }
 
 // tokens sums every token dimension the API reports (see DailyRow's doc
@@ -278,7 +312,7 @@ func parseUsageDaily(data []byte, agent string) (*UsageDaily, error) {
 	out := &UsageDaily{
 		Totals: Totals{
 			Tokens: raw.Totals.tokens(),
-			Cost:   raw.Totals.TotalCost,
+			Cost:   float64(raw.Totals.TotalCost),
 		},
 	}
 	for _, day := range raw.Daily {
@@ -288,7 +322,7 @@ func parseUsageDaily(data []byte, agent string) (*UsageDaily, error) {
 				Agent:  agent,
 				Model:  mb.ModelName,
 				Tokens: mb.tokens(),
-				Cost:   mb.Cost,
+				Cost:   float64(mb.Cost),
 			})
 		}
 	}

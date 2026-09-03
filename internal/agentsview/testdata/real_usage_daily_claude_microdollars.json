@@ -1,0 +1,41 @@
+{
+  "daily": [
+    {
+      "date": "2026-09-03",
+      "inputTokens": 62,
+      "outputTokens": 10558,
+      "cacheCreationTokens": 77601,
+      "cacheReadTokens": 2609884,
+      "totalCost": {
+        "microdollars": 936506
+      },
+      "modelsUsed": [
+        "claude-sonnet-5"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-sonnet-5",
+          "inputTokens": 62,
+          "outputTokens": 10558,
+          "cacheCreationTokens": 77601,
+          "cacheReadTokens": 2609884,
+          "cost": {
+            "microdollars": 936506
+          }
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "inputTokens": 62,
+    "outputTokens": 10558,
+    "cacheCreationTokens": 77601,
+    "cacheReadTokens": 2609884,
+    "totalCost": {
+      "microdollars": 936506
+    },
+    "cacheSavings": {
+      "microdollars": 4544168
+    }
+  }
+}
